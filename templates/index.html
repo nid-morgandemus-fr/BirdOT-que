@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BirdOTèque - Bird Song Library</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+
+        .sidebar {
+            width: 350px;
+            background: #2a2a2a;
+            border-right: 2px solid #3a3a3a;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            background: #333;
+            border-bottom: 2px solid #3a3a3a;
+            font-size: 18px;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+
+        .search-container {
+            padding: 15px;
+            background: #2a2a2a;
+            border-bottom: 1px solid #3a3a3a;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 10px 15px;
+            background: #1a1a1a;
+            border: 2px solid #3a3a3a;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .search-input:focus { border-color: #4CAF50; background: #252525; }
+        .search-input::placeholder { color: #666; }
+
+        .tree-container { flex: 1; overflow-y: auto; padding: 10px; }
+        .tree-item { margin: 2px 0; }
+
+        .tree-folder {
+            padding: 8px 12px; cursor: pointer; border-radius: 4px;
+            transition: background 0.2s; display: flex; align-items: center; gap: 8px;
+        }
+        .tree-folder:hover { background: #3a3a3a; }
+        .tree-folder::before { content: ''; font-size: 14px; }
+        .tree-folder.expanded::before { content: ''; }
+
+        .tree-children { margin-left: 20px; display: none; }
+        .tree-children.show { display: block; }
+
+        .tree-file {
+            padding: 6px 12px; cursor: pointer; border-radius: 4px;
+            transition: background 0.2s; font-size: 14px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .tree-file:hover { background: #3a3a3a; }
+        .tree-file.audio::before { content: '🎵'; }
+        .tree-file.has-spectrogram::after { 
+            content: '📊'; margin-left: auto; font-size: 12px; opacity: 0.6; 
+        }
+
+        .main-content { 
+            flex: 1; 
+            display: flex; 
+            flex-direction: column; 
+            overflow: hidden; 
+            position: relative;
+        }
+
+        .content-header {
+            padding: 20px; background: #2a2a2a;
+            border-bottom: 2px solid #3a3a3a; font-size: 16px; color: #4CAF50;
+        }
+
+        .content-area {
+            flex: 1; overflow-y: auto; padding: 30px;
+            display: flex; flex-direction: column; align-items: center; gap: 20px;
+        }
+
+        .spectrogram-container, .audio-player-container, .file-info {
+            width: 100%; max-width: 1000px; background: #2a2a2a;
+            border-radius: 8px; padding: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        }
+
+        .spectrogram-image {
+            width: 100%; height: auto; border-radius: 4px; background: #1a1a1a;
+        }
+
+        .audio-player { width: 100%; outline: none; }
+        .audio-player::-webkit-media-controls-panel { background: #333; }
+
+        .file-info h3 { color: #4CAF50; margin-bottom: 10px; }
+        .file-info p { margin: 8px 0; color: #b0b0b0; }
+
+        .download-btn {
+            display: inline-block; padding: 10px 20px; background: #4CAF50;
+            color: white; text-decoration: none; border-radius: 6px;
+            margin-top: 10px; margin-right: 5px; transition: background 0.2s;
+        }
+        .download-btn:hover { background: #45a049; }
+
+        .placeholder {
+            display: flex; align-items: center; justify-content: center;
+            height: 100%; color: #666; font-size: 18px;
+        }
+
+        .no-spectrogram {
+            color: #666; font-style: italic; padding: 40px; text-align: center;
+            background: #252525; border-radius: 8px; width: 100%;
+        }
+
+        /* BOUTONS EN BAS À DROITE */
+        .main-buttons {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            z-index: 100;
+        }
+
+        .help-button, .github-button {
+            padding: 14px 24px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            text-align: center;
+            min-width: 180px;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .help-button:hover, .github-button:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.5);
+        }
+
+        .help-button { background: #4CAF50; }
+        .help-button:hover { background: #45a049; }
+
+        .github-button { background: #333; border: 2px solid #4CAF50; }
+        .github-button:hover { background: #444; }
+
+        .generate-button {
+            padding: 14px 24px;
+            background: #FF9800;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: all 0.2s;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+            text-align: center;
+            min-width: 180px;
+        }
+        .generate-button:hover { 
+            background: #F57C00; 
+            transform: translateY(-2px);
+            box-shadow: 0 6px 16px rgba(0,0,0,0.5);
+        }
+        .generate-button:disabled { 
+            background: #666; 
+            cursor: not-allowed; 
+            transform: none;
+        }
+
+        /* COPYRIGHT */
+        .copyright {
+            position: fixed;
+            bottom: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #666;
+            font-size: 12px;
+            text-align: center;
+            z-index: 100;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 15px;
+            border-radius: 20px;
+        }
+
+        /* Modals */
+        .modal, .generate-modal {
+            display: none; position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%; background: rgba(0,0,0,0.85);
+            z-index: 1000; align-items: center; justify-content: center;
+        }
+        .modal.show, .generate-modal.show { display: flex; }
+
+        .modal-content, .generate-modal-content {
+            background: #2a2a2a; padding: 40px; border-radius: 12px;
+            width: 90%; max-width: 900px; max-height: 85vh; overflow-y: auto;
+            position: relative; border: 2px solid #3a3a3a;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        .generate-modal-content { max-width: 600px; padding: 30px; }
+
+        .modal-close, .generate-modal-close {
+            position: absolute; top: 15px; right: 15px;
+            background: #4CAF50; color: white; border: none;
+            width: 36px; height: 36px; border-radius: 50%;
+            cursor: pointer; font-size: 20px; line-height: 1;
+            transition: all 0.2s; z-index: 10;
+        }
+        .modal-close:hover, .generate-modal-close:hover {
+            background: #45a049; transform: rotate(90deg);
+        }
+        .generate-modal-close { background: #666; }
+        .generate-modal-close:hover { background: #f44336; }
+
+        /* Readme Styles */
+        .readme-content { color: #e0e0e0; line-height: 1.8; font-size: 15px; }
+        .readme-content h1 { color: #4CAF50; font-size: 32px; margin: 30px 0 20px 0; padding-bottom: 10px; border-bottom: 2px solid #3a3a3a; }
+        .readme-content h2 { color: #4CAF50; font-size: 24px; margin: 25px 0 15px 0; padding-bottom: 8px; border-bottom: 1px solid #3a3a3a; }
+        .readme-content h3 { color: #66BB6A; font-size: 20px; margin: 20px 0 12px 0; }
+        .readme-content p { margin: 12px 0; }
+        .readme-content ul, .readme-content ol { margin: 15px 0; padding-left: 30px; }
+        .readme-content li { margin: 8px 0; }
+        .readme-content code { background: #1a1a1a; padding: 3px 8px; border-radius: 4px; font-family: monospace; color: #81C784; border: 1px solid #3a3a3a; }
+        .readme-content pre { background: #1a1a1a; padding: 15px; border-radius: 6px; overflow-x: auto; margin: 15px 0; border: 1px solid #3a3a3a; }
+        .readme-content pre code { background: transparent; padding: 0; border: none; color: #e0e0e0; }
+        .readme-content a { color: #4CAF50; text-decoration: none; border-bottom: 1px dotted #4CAF50; }
+        .readme-content a:hover { color: #66BB6A; border-bottom-style: solid; }
+
+        /* Generate Modal Styles */
+        .generate-options { margin: 20px 0; }
+        .generate-option {
+            display: flex; align-items: center; gap: 10px; margin: 15px 0;
+            padding: 15px; background: #1a1a1a; border-radius: 6px;
+            cursor: pointer; transition: background 0.2s;
+        }
+        .generate-option:hover { background: #252525; }
+        .generate-option input[type="radio"] { width: 20px; height: 20px; cursor: pointer; }
+        .generate-option label { flex: 1; cursor: pointer; font-size: 14px; }
+
+        .generate-path-input {
+            width: 100%; padding: 10px; background: #1a1a1a;
+            border: 2px solid #3a3a3a; border-radius: 6px;
+            color: #e0e0e0; font-size: 14px; margin: 10px 0;
+        }
+        .generate-path-input:focus { border-color: #FF9800; outline: none; }
+
+        .generate-browse-btn {
+            padding: 8px 15px; background: #FF9800; color: white;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 13px; margin-top: 10px;
+        }
+        .generate-browse-btn:hover { background: #F57C00; }
+
+        .recursive-option { margin: 15px 0; padding: 10px; background: #1a1a1a; border-radius: 6px; }
+        .recursive-option label { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; }
+        .recursive-option input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; }
+
+        .generate-start-btn {
+            width: 100%; padding: 12px; background: #4CAF50; color: white;
+            border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; margin-top: 20px;
+        }
+        .generate-start-btn:hover { background: #45a049; }
+        .generate-start-btn:disabled { background: #666; cursor: not-allowed; }
+
+        .generation-progress { margin-top: 20px; padding: 15px; background: #1a1a1a; border-radius: 6px; display: none; }
+        .generation-progress.show { display: block; }
+
+        .progress-bar { width: 100%; height: 20px; background: #333; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; background: #4CAF50; transition: width 0.3s; display: flex; align-items: center; justify-content: center; color: white; font-size: 12px; font-weight: bold; }
+        .progress-stats { display: flex; justify-content: space-between; margin: 10px 0; font-size: 13px; color: #b0b0b0; }
+
+        .generation-log {
+            max-height: 200px; overflow-y: auto; background: #0a0a0a; padding: 10px;
+            border-radius: 6px; font-family: 'Courier New', monospace; font-size: 12px; color: #81C784; margin-top: 10px;
+        }
+        .generation-log-entry { margin: 5px 0; padding: 3px 0; border-bottom: 1px solid #1a1a1a; }
+
+        .no-results { text-align: center; padding: 20px; color: #666; font-style: italic; }
+
+        ::-webkit-scrollbar { width: 10px; }
+        ::-webkit-scrollbar-track { background: #1a1a1a; }
+        ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 5px; }
+        ::-webkit-scrollbar-thumb:hover { background: #5a5a5a; }
+    </style>
+</head>
+<body>
+    <div class="sidebar">
+        <div class="sidebar-header">🐦 BirdOTèque</div>
+        
+        <div class="search-container">
+            <input type="text" class="search-input" id="searchInput" placeholder="🔍 Search bird recordings..." autocomplete="off">
+        </div>
+
+        <div class="tree-container" id="treeContainer"></div>
+    </div>
+
+    <div class="main-content">
+        <div class="content-header" id="contentHeader">Select a bird recording to start</div>
+        <div class="content-area" id="contentArea">
+            <div class="placeholder">👈 Choose a recording from the menu on the left</div>
+        </div>
+    </div>
+
+    <!-- BOUTONS EN BAS À DROITE -->
+    <div class="main-buttons">
+        <button class="help-button" onclick="showReadme()">❓ Help</button>
+        <a href="https://github.com/MDitor-map/BirdOT-que" target="_blank" class="github-button">🐙 Contribute</a>
+        <button class="generate-button" onclick="showGenerateModal()">🎨 Generate Spectrograms</button>
+    </div>
+
+    <!-- COPYRIGHT -->
+    <div class="copyright">© 2026 Morgan Demus - BirdOTèque</div>
+
+    <!-- Help Modal -->
+    <div class="modal" id="readmeModal">
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeReadme()">×</button>
+            <div class="readme-content" id="readmeContent">
+                <p style="text-align: center; color: #666;">Loading README...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Generate Modal -->
+    <div class="generate-modal" id="generateModal">
+    <div class="generate-modal-content">
+        <button class="generate-modal-close" onclick="closeGenerateModal()">×</button>
+        <h2 style="color: #FF9800; margin-bottom: 20px;">🎨 Generate Spectrograms</h2>
+        
+        <!-- AVERTISSEMENT -->
+        <div style="background: #fff3cd; border-left: 4px solid #FF9800; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+            <p style="color: #856404; margin: 0; font-weight: bold;">⚠️ Warning</p>
+            <p style="color: #856404; margin: 5px 0 0 0; font-size: 13px;">
+                Existing spectrogram files will be overwritten with new ones.
+            </p>
+        </div>
+        
+        <div class="generate-options">
+            <div class="generate-option" onclick="selectGenType('file')">
+                <input type="radio" id="genFile" name="genType" value="file">
+                <label for="genFile">📄 Single Audio File</label>
+            </div>
+            <div class="generate-option" onclick="selectGenType('directory')">
+                <input type="radio" id="genDir" name="genType" value="directory">
+                <label for="genDir">📁 Directory (all audio files)</label>
+            </div>
+        </div>
+        
+        <div id="fileSelection" style="display: none;">
+            <label style="display: block; margin-bottom: 8px; color: #b0b0b0; font-size: 13px;">Audio File Path:</label>
+            <input type="text" class="generate-path-input" id="genFilePath" placeholder="e.g., /home/user/birds/song.wav">
+            <button class="generate-browse-btn" onclick="browseFile()">📂 Browse File</button>
+        </div>
+        
+        <div id="dirSelection" style="display: none;">
+            <label style="display: block; margin-bottom: 8px; color: #b0b0b0; font-size: 13px;">Directory Path:</label>
+            <input type="text" class="generate-path-input" id="genDirPath" placeholder="e.g., /home/user/birds/recordings">
+            <button class="generate-browse-btn" onclick="browseDirectory()">📂 Browse Directory</button>
+            <div class="recursive-option">
+                <label><input type="checkbox" id="genRecursive" checked> Include subdirectories (recursive)</label>
+            </div>
+        </div>
+        
+        <button class="generate-start-btn" id="startGenBtn" onclick="startGeneration()">🚀 Start Generation</button>
+        
+        <div class="generation-progress" id="genProgress">
+            <h3 style="color: #4CAF50; margin-bottom: 10px;">Generation Progress</h3>
+            <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width: 0%;">0%</div></div>
+            <div class="progress-stats">
+                <span id="progressCompleted">Completed: 0</span>
+                <span id="progressFailed">Failed: 0</span>
+                <span id="progressTotal">Total: 0</span>
+            </div>
+            <div class="generation-log" id="genLog"></div>
+        </div>
+    </div>
+</div>
+
+    <script>
+        let structure = [];
+        let originalTree = null;
+
+        async function loadStructure() {
+            try {
+                const response = await fetch('/api/structure');
+                structure = await response.json();
+                originalTree = buildTree();
+                renderTree(originalTree);
+            } catch (error) { console.error('Error loading structure:', error); }
+        }
+
+        function buildTree() {
+            const tree = {};
+            structure.forEach(item => {
+                const parts = item.path.split('/').filter(p => p && p !== '.');
+                let current = tree;
+                parts.forEach((part, index) => {
+                    if (!current[part]) current[part] = { _audio: [], _path: parts.slice(0, index + 1).join('/') };
+                    if (index === parts.length - 1) current[part]._audio = item.audio;
+                    current = current[part];
+                });
+            });
+            return tree;
+        }
+
+        function renderTree(tree) {
+            const container = document.getElementById('treeContainer');
+            container.innerHTML = '';
+            function renderNode(node, element, level = 0) {
+                Object.keys(node).forEach(key => {
+                    if (key.startsWith('_')) return;
+                    const item = node[key];
+                    const hasChildren = Object.keys(item).some(k => !k.startsWith('_'));
+                    const hasFiles = item._audio && item._audio.length > 0;
+                    const div = document.createElement('div');
+                    div.className = 'tree-item';
+                    const folder = document.createElement('div');
+                    folder.className = 'tree-folder';
+                    folder.textContent = key;
+                    folder.style.paddingLeft = (level * 15 + 12) + 'px';
+                    if (hasChildren || hasFiles) {
+                        const childrenDiv = document.createElement('div');
+                        childrenDiv.className = 'tree-children';
+                        folder.onclick = (e) => { e.stopPropagation(); folder.classList.toggle('expanded'); childrenDiv.classList.toggle('show'); };
+                        if (hasFiles) {
+                            item._audio.forEach(audio => {
+                                const fileDiv = document.createElement('div');
+                                fileDiv.className = 'tree-file audio';
+                                if (audio.spectrogram) fileDiv.classList.add('has-spectrogram');
+                                fileDiv.textContent = audio.name;
+                                fileDiv.onclick = (e) => { e.stopPropagation(); showFile(item._path, audio.name, audio.spectrogram); };
+                                childrenDiv.appendChild(fileDiv);
+                            });
+                        }
+                        if (hasChildren) renderNode(item, childrenDiv, level + 1);
+                        div.appendChild(folder);
+                        div.appendChild(childrenDiv);
+                    }
+                    element.appendChild(div);
+                });
+            }
+            renderNode(tree, container);
+        }
+
+        function filterTree(searchTerm) {
+            if (!originalTree) return;
+            const term = searchTerm.toLowerCase().trim();
+            if (term === '') { renderTree(originalTree); return; }
+            const filteredTree = {};
+            function filterNode(node) {
+                const filtered = {};
+                Object.keys(node).forEach(key => {
+                    if (key.startsWith('_')) return;
+                    const item = node[key];
+                    const hasChildren = Object.keys(item).some(k => !k.startsWith('_'));
+                    const keyMatch = key.toLowerCase().includes(term);
+                    const filteredAudio = item._audio.filter(a => a.name.toLowerCase().includes(term));
+                    let childrenFiltered = hasChildren ? filterNode(item) : {};
+                    if (keyMatch || Object.keys(childrenFiltered).length > 0 || filteredAudio.length > 0) {
+                        filtered[key] = { _audio: filteredAudio.length > 0 ? filteredAudio : item._audio, _path: item._path };
+                        if (Object.keys(childrenFiltered).length > 0) Object.assign(filtered[key], childrenFiltered);
+                    }
+                });
+                return filtered;
+            }
+            const result = filterNode(originalTree);
+            if (Object.keys(result).length === 0) {
+                document.getElementById('treeContainer').innerHTML = '<div class="no-results">No recordings found</div>';
+            } else {
+                renderTree(result);
+                document.querySelectorAll('.tree-folder').forEach(folder => {
+                    folder.classList.add('expanded');
+                    const children = folder.nextElementSibling;
+                    if (children && children.classList.contains('tree-children')) children.classList.add('show');
+                });
+            }
+        }
+
+        document.getElementById('searchInput').addEventListener('input', (e) => filterTree(e.target.value));
+
+        function showFile(path, filename, spectrogramFile) {
+            const contentHeader = document.getElementById('contentHeader');
+            const contentArea = document.getElementById('contentArea');
+            contentHeader.textContent = `${path}/${filename}`;
+            const audioUrl = `/files/${path}/${filename}`;
+            const spectrogramUrl = spectrogramFile ? `/files/${path}/${spectrogramFile}` : null;
+            
+            let html = '<div class="spectrogram-container"><h3 style="margin-bottom: 15px; color: #4CAF50;">📊 Spectrogram</h3>';
+            html += spectrogramUrl ? `<img src="${spectrogramUrl}?t=${new Date().getTime()}" alt="Spectrogram" class="spectrogram-image">` : '<div class="no-spectrogram">📭 No spectrogram available. Use the "Generate Spectrograms" button.</div>';
+            html += '</div>';
+            
+            html += '<div class="audio-player-container"><h3 style="margin-bottom: 15px; color: #4CAF50;">🎵 Audio Player</h3>';
+            html += `<audio controls class="audio-player" id="audioPlayer"><source src="${audioUrl}" type="audio/${filename.split('.').pop()}">Your browser does not support the audio element.</audio></div>`;
+            
+            html += '<div class="file-info"><h3>🐦 ' + filename + '</h3>';
+            html += `<p><strong>Path:</strong> ${path}/${filename}</p>`;
+            html += `<a href="${audioUrl}" download class="download-btn">⬇️ Download Audio</a>`;
+            if (spectrogramUrl) html += `<a href="${spectrogramUrl}" download class="download-btn">⬇️ Download Spectrogram</a>`;
+            html += '</div>';
+            
+            contentArea.innerHTML = html;
+        }
+
+        async function showReadme() {
+            const modal = document.getElementById('readmeModal');
+            const content = document.getElementById('readmeContent');
+            modal.classList.add('show');
+            content.innerHTML = '<p style="text-align: center; color: #666;">Loading README...</p>';
+            
+            try {
+                const response = await fetch('/api/readme');
+                if (response.status === 404) {
+                    content.innerHTML = '<div style="text-align: center; padding: 40px;"><h3 style="color: #FF9800;">📖 README Not Found</h3><p style="color: #b0b0b0; margin-top: 15px;">The README.md file was not found in the selected directory or the application root.</p><p style="color: #666; margin-top: 10px; font-size: 13px;">Please place a README.md file in your BirdOTèque folder.</p></div>';
+                    return;
+                }
+                const html = await response.text();
+                content.innerHTML = html;
+                content.querySelectorAll('a').forEach(link => {
+                    if (link.href && !link.href.startsWith(window.location.origin)) {
+                        link.target = '_blank'; link.rel = 'noopener noreferrer';
+                    }
+                });
+            } catch (error) {
+                content.innerHTML = `<p style="color: #f44336;">❌ Error loading: ${error.message}</p>`;
+            }
+        }
+
+        function closeReadme() { document.getElementById('readmeModal').classList.remove('show'); }
+        document.getElementById('readmeModal').onclick = (e) => { if (e.target.id === 'readmeModal') closeReadme(); };
+
+        // --- Generate Modal Logic ---
+        function showGenerateModal() {
+            document.getElementById('generateModal').classList.add('show');
+            resetGenerationForm();
+        }
+        function closeGenerateModal() { document.getElementById('generateModal').classList.remove('show'); }
+        
+        function resetGenerationForm() {
+            const ids = ['genFilePath', 'genDirPath', 'genProgress', 'genLog'];
+            ids.forEach(id => { const el = document.getElementById(id); if(el) { if(id==='genProgress') el.classList.remove('show'); else if(id==='genLog') el.innerHTML=''; else el.value=''; }});
+            const btn = document.getElementById('startGenBtn'); if(btn) btn.disabled = false;
+            const genFile = document.getElementById('genFile'); const genDir = document.getElementById('genDir');
+            if(genFile) genFile.checked = false; if(genDir) genDir.checked = false;
+            const fs = document.getElementById('fileSelection'); const ds = document.getElementById('dirSelection');
+            if(fs) fs.style.display = 'none'; if(ds) ds.style.display = 'none';
+        }
+
+        function selectGenType(type) {
+            const genFile = document.getElementById('genFile'); const genDir = document.getElementById('genDir');
+            const fs = document.getElementById('fileSelection'); const ds = document.getElementById('dirSelection');
+            if (type === 'file') { if(genFile) genFile.checked = true; if(fs) fs.style.display = 'block'; if(ds) ds.style.display = 'none'; } 
+            else { if(genDir) genDir.checked = true; if(fs) fs.style.display = 'none'; if(ds) ds.style.display = 'block'; }
+        }
+
+        function browseFile() {
+            const input = document.createElement('input'); input.type = 'file'; input.accept = '.wav,.mp3,.ogg,.flac,.m4a,.aac,.wma,audio/*';
+            input.onchange = (e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                    const file = e.target.files[0]; const el = document.getElementById('genFilePath');
+                    if(el) { alert(`Selected: ${file.name}\n\nPlease enter the full path manually above.\nExample: /home/user/birds/${file.name}`); el.value = file.name; el.focus(); }
+                }
+            }; input.click();
+        }
+
+        function browseDirectory() {
+            const input = document.createElement('input'); input.type = 'file'; input.webkitdirectory = true; input.multiple = true;
+            input.onchange = (e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                    const pathParts = e.target.files[0].webkitRelativePath ? e.target.files[0].webkitRelativePath.split('/') : [];
+                    const el = document.getElementById('genDirPath');
+                    if (pathParts.length > 1 && el) { el.value = pathParts[0]; el.focus(); }
+                    else if (el) { alert('Please enter the full directory path manually.'); }
+                }
+            }; input.click();
+        }
+
+        async function startGeneration() {
+    const genType = document.querySelector('input[name="genType"]:checked');
+    if (!genType) { alert('Please select either "Single Audio File" or "Directory"'); return; }
+    
+    let targetPath = '', recursive = false;
+    if (genType.value === 'file') { 
+        targetPath = document.getElementById('genFilePath').value.trim(); 
+        if(!targetPath) { alert('Please enter a file path'); return; } 
+    } else { 
+        targetPath = document.getElementById('genDirPath').value.trim(); 
+        recursive = document.getElementById('genRecursive').checked; 
+        if(!targetPath) { alert('Please enter a directory path'); return; } 
+    }
+
+    // CONFIRMATION AVANT GÉNÉRATION
+    const confirmMsg = recursive ? 
+        '⚠️ Warning: This will overwrite existing spectrogram files in the directory and all subdirectories.\n\nDo you want to continue?' :
+        '⚠️ Warning: This will overwrite existing spectrogram files.\n\nDo you want to continue?';
+    
+    if (!confirm(confirmMsg)) {
+        return; // Utilisateur a annulé
+    }
+
+    const btn = document.getElementById('startGenBtn'); 
+    const prog = document.getElementById('genProgress'); 
+    const log = document.getElementById('genLog');
+    if(btn) btn.disabled = true; 
+    if(prog) prog.classList.add('show'); 
+    if(log) log.innerHTML = '<div class="generation-log-entry">⏳ Starting...</div>';
+
+    try {
+        const res = await fetch('/api/generate_spectrogram', { 
+            method: 'POST', 
+            headers: {'Content-Type': 'application/json'}, 
+            body: JSON.stringify({ path: targetPath, recursive }) 
+        });
+        if (res.ok) { 
+            if(log) log.innerHTML += '<div class="generation-log-entry">✅ Generation started</div>'; 
+            pollGenerationStatus(); 
+        } else { 
+            const data = await res.json(); 
+            alert(`Error: ${data.error}`); 
+            if(btn) btn.disabled = false; 
+        }
+    } catch (error) { 
+        alert(`Error: ${error.message}`); 
+        if(btn) btn.disabled = false; 
+    }
+}
+
+        async function pollGenerationStatus() {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/generation_status'); const status = await res.json();
+                    const fill = document.getElementById('progressFill');
+                    if (status.total > 0 && fill) {
+                        const pct = Math.round(((status.completed + status.failed) / status.total) * 100);
+                        fill.style.width = `${pct}%`; fill.textContent = `${pct}%`;
+                        const pc = document.getElementById('progressCompleted'); if(pc) pc.textContent = `Completed: ${status.completed}`;
+                        const pf = document.getElementById('progressFailed'); if(pf) pf.textContent = `Failed: ${status.failed}`;
+                        const pt = document.getElementById('progressTotal'); if(pt) pt.textContent = `Total: ${status.total}`;
+                    }
+                    const log = document.getElementById('genLog');
+                    if (log && status.log) { log.innerHTML = status.log.map(e => `<div class="generation-log-entry">${escapeHtml(e)}</div>`).join(''); log.scrollTop = log.scrollHeight; }
+                    
+                    if (!status.running && status.total > 0) {
+                        clearInterval(interval); const btn = document.getElementById('startGenBtn'); if(btn) btn.disabled = false;
+                        if(log) log.innerHTML += '<div class="generation-log-entry" style="color: #4CAF50; font-weight: bold;">✅ Completed!</div>';
+                        await refreshStructure();
+                        setTimeout(() => { closeGenerateModal(); alert('Spectrograms generated successfully!'); }, 2000);
+                    }
+                } catch (e) { console.error(e); }
+            }, 1000);
+        }
+
+        function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
+        async function refreshStructure() { try { await fetch('/api/refresh_structure'); await loadStructure(); } catch (e) { console.error(e); } }
+        document.getElementById('generateModal').onclick = (e) => { if (e.target.id === 'generateModal') closeGenerateModal(); };
+
+        // Init listeners safely
+        document.addEventListener('DOMContentLoaded', () => {
+            const modal = document.getElementById('generateModal');
+            if (modal) {
+                modal.addEventListener('change', (e) => { if (e.target.name === 'genType') selectGenType(e.target.value); });
+                const fp = document.getElementById('genFilePath'); const dp = document.getElementById('genDirPath'); const btn = document.getElementById('startGenBtn');
+                if (fp) fp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'file' && btn) btn.disabled = !this.value.trim(); });
+                if (dp) dp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'directory' && btn) btn.disabled = !this.value.trim(); });
+            }
+        });
+
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeReadme(); closeGenerateModal(); } });
+
+        loadStructure();
+    </script>
+</body>
+</html>

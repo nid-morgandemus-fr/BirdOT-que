@@ -130,7 +130,6 @@
             background: #252525; border-radius: 8px; width: 100%;
         }
 
-        /* BOUTONS EN BAS À DROITE */
         .main-buttons {
             position: fixed;
             bottom: 30px;
@@ -140,6 +139,69 @@
             gap: 12px;
             z-index: 100;
         }
+        
+        .theme-toggle {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 10px 15px;
+    background: #2a2a2a;
+    border: 2px solid #4CAF50;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 18px;
+    z-index: 1000;
+    transition: all 0.3s;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+
+.theme-toggle:hover {
+    transform: scale(1.1);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+}
+
+body.light-theme {
+    background: #f5f5f5;
+    color: #333;
+}
+
+body.light-theme .sidebar {
+    background: #fff;
+    border-right: 2px solid #ddd;
+}
+
+body.light-theme .sidebar-header {
+    background: #f0f0f0;
+    border-bottom: 2px solid #ddd;
+    color: #2e7d32;
+}
+
+body.light-theme .search-input {
+    background: #f5f5f5;
+    border-color: #ddd;
+    color: #333;
+}
+
+body.light-theme .tree-folder:hover {
+    background: #e8f5e9;
+}
+
+body.light-theme .tree-file:hover {
+    background: #e8f5e9;
+}
+
+body.light-theme .content-header {
+    background: #f0f0f0;
+    border-bottom: 2px solid #ddd;
+    color: #2e7d32;
+}
+
+body.light-theme .spectrogram-container,
+body.light-theme .audio-player-container,
+body.light-theme .file-info {
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
 
         .help-button, .github-button {
             padding: 14px 24px;
@@ -310,6 +372,7 @@
 </head>
 <body>
     <div class="sidebar">
+        <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌓</button>
         <div class="sidebar-header">🐦 BirdOTèque</div>
         
         <div class="search-container">
@@ -427,6 +490,20 @@
             });
             return tree;
         }
+        
+        function toggleTheme() {
+    document.body.classList.toggle('light-theme');
+    const isLight = document.body.classList.contains('light-theme');
+    localStorage.setItem('birdoteque-theme', isLight ? 'light' : 'dark');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    const savedTheme = localStorage.getItem('birdoteque-theme');
+    if (savedTheme === 'light') {
+        document.body.classList.add('light-theme');
+    }
+});
+
 
         function renderTree(tree) {
             const container = document.getElementById('treeContainer');

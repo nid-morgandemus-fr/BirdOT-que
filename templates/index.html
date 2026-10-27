@@ -11,9 +11,17 @@
 
     <div class="sidebar">
         <div class="sidebar-header">🐦 BirdOTèque</div>
+        
         <div class="search-container">
             <input type="text" class="search-input" id="searchInput" placeholder="🔍 Search bird recordings..." autocomplete="off">
+            <select class="filter-select" id="spectrogramFilter">
+                <option value="all">All files</option>
+                <option value="with">With spectrogram</option>
+                <option value="without">Without spectrogram</option>
+            </select>
         </div>
+
+        <!-- C'est cet élément qui manquait ou était mal orthographié -->
         <div class="tree-container" id="treeContainer"></div>
     </div>
 
@@ -32,6 +40,7 @@
 
     <div class="copyright">© 2026 Morgan Demus - BirdOTèque</div>
 
+    <!-- Help Modal -->
     <div class="modal" id="readmeModal">
         <div class="modal-content">
             <button class="modal-close" onclick="closeReadme()">×</button>
@@ -41,6 +50,7 @@
         </div>
     </div>
 
+    <!-- Generate Modal -->
     <div class="generate-modal" id="generateModal">
         <div class="generate-modal-content">
             <button class="generate-modal-close" onclick="closeGenerateModal()">×</button>

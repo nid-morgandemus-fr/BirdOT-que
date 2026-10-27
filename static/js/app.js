@@ -26,6 +26,7 @@ function buildTree() {
 
 function renderTree(tree) {
     const container = document.getElementById('treeContainer');
+    if (!container) return; // Sécurité ajoutée
     container.innerHTML = '';
     function renderNode(node, element, level = 0) {
         Object.keys(node).forEach(key => {
@@ -63,12 +64,20 @@ function renderTree(tree) {
     renderNode(tree, container);
 }
 
-function filterTree(searchTerm) {
+function applyFilters() {
+    const searchInput = document.getElementById('searchInput');
+    const spectroFilter = document.getElementById('spectrogramFilter');
+    if (!searchInput || !spectroFilter) return;
+    filterTree(searchInput.value, spectroFilter.value);
+}
+
+function filterTree(searchTerm, spectroFilter = 'all') {
     if (!originalTree) return;
     const term = searchTerm.toLowerCase().trim();
-    if (term === '') { renderTree(originalTree); return; }
-    
-    const filteredTree = {};
+    if (term === '' && spectroFilter === 'all') { 
+        renderTree(originalTree); 
+        return; 
+    }
     
     function filterNode(node, parentPath = '') {
         const filtered = {};
@@ -80,23 +89,56 @@ function filterTree(searchTerm) {
             const keyMatch = key.toLowerCase().includes(term);
             const pathMatch = (parentPath + '/' + key).toLowerCase().includes(term);
             
-            const filteredAudio = item._audio.filter(a => a.name.toLowerCase().includes(term));
-            let childrenFiltered = hasChildren ? filterNode(item, parentPath + '/' + key) : {};
+            // 1. Filtre texte sur les noms de fichiers
+            let filteredAudio = item._audio.filter(a => a.name.toLowerCase().includes(term));
             
-            if (keyMatch || pathMatch || Object.keys(childrenFiltered).length > 0 || filteredAudio.length > 0) {
+            // 2. Filtre spectrogramme
+            if (spectroFilter === 'with') {
+                filteredAudio = filteredAudio.filter(a => a.spectrogram !== null && a.spectrogram !== undefined && a.spectrogram !== '');
+            } else if (spectroFilter === 'without') {
+                filteredAudio = filteredAudio.filter(a => a.spectrogram === null || a.spectrogram === undefined || a.spectrogram === '');
+            }
+            
+            // 3. Récursion sur les sous-dossiers
+            let childrenFiltered = hasChildren ? filterNode(item, parentPath + '/' + key) : {};
+            const hasValidChildren = Object.keys(childrenFiltered).length > 0;
+            
+            // 4. Décision d'inclusion du dossier
+            if (keyMatch || pathMatch) {
+                // Le dossier correspond à la recherche texte.
+                // On affiche ses fichiers, MAIS en respectant le filtre spectrogramme !
+                let displayAudio = item._audio;
+                if (spectroFilter === 'with') {
+                    displayAudio = displayAudio.filter(a => a.spectrogram !== null && a.spectrogram !== undefined && a.spectrogram !== '');
+                } else if (spectroFilter === 'without') {
+                    displayAudio = displayAudio.filter(a => a.spectrogram === null || a.spectrogram === undefined || a.spectrogram === '');
+                }
+                
+                if (displayAudio.length > 0 || hasValidChildren) {
+                    filtered[key] = { 
+                        _audio: displayAudio, 
+                        _path: item._path 
+                    };
+                    if (hasValidChildren) Object.assign(filtered[key], childrenFiltered);
+                }
+            } else if (filteredAudio.length > 0 || hasValidChildren) {
+                // Le dossier ne matche pas le texte, mais contient des fichiers qui matchent (texte + spectro)
                 filtered[key] = { 
-                    _audio: filteredAudio.length > 0 ? filteredAudio : item._audio, 
+                    _audio: filteredAudio, 
                     _path: item._path 
                 };
-                if (Object.keys(childrenFiltered).length > 0) Object.assign(filtered[key], childrenFiltered);
+                if (hasValidChildren) Object.assign(filtered[key], childrenFiltered);
             }
         });
         return filtered;
     }
     
     const result = filterNode(originalTree);
+    const container = document.getElementById('treeContainer');
+    if (!container) return;
+    
     if (Object.keys(result).length === 0) {
-        document.getElementById('treeContainer').innerHTML = '<div class="no-results">No recordings found</div>';
+        container.innerHTML = '<div class="no-results">No recordings found</div>';
     } else {
         renderTree(result);
         document.querySelectorAll('.tree-folder').forEach(folder => {
@@ -107,9 +149,8 @@ function filterTree(searchTerm) {
     }
 }
 
-document.getElementById('searchInput').addEventListener('input', (e) => filterTree(e.target.value));
-
 async function showFile(path, filename, spectrogramFile) {
+    // CORRECTION VITALE : La regex originale sur GitHub était vide (//g) et cassait tout
     const safePath = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilename = filename.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilepath = `${safePath}/${safeFilename}`;
@@ -149,7 +190,6 @@ async function showFile(path, filename, spectrogramFile) {
     html += '</div>';
     
     contentArea.innerHTML = html;
-    
     loadCoordinates(`${path}/${filename}`);
 }
 
@@ -169,9 +209,7 @@ async function loadCoordinates(filepath) {
                 osmBtn.style.display = 'inline-block';
             }
         }
-    } catch (error) {
-        console.error('Error loading coordinates:', error);
-    }
+    } catch (error) { console.error('Error loading coordinates:', error); }
 }
 
 async function saveCoordinates(filepath) {
@@ -357,7 +395,6 @@ async function pollGenerationStatus() {
 
 function escapeHtml(text) { const div = document.createElement('div'); div.textContent = text; return div.innerHTML; }
 async function refreshStructure() { try { await fetch('/api/refresh_structure'); await loadStructure(); } catch (e) { console.error(e); } }
-document.getElementById('generateModal').onclick = (e) => { if (e.target.id === 'generateModal') closeGenerateModal(); };
 
 function toggleTheme() {
     document.body.classList.toggle('light-theme');
@@ -368,27 +405,6 @@ function toggleTheme() {
         themeIcon.textContent = isLight ? '☀️' : '🌙';
     }
 }
-
-document.addEventListener('DOMContentLoaded', () => {
-    const savedTheme = localStorage.getItem('birdoteque-theme');
-    if (savedTheme === 'light') {
-        document.body.classList.add('light-theme');
-        const themeIcon = document.getElementById('theme-icon');
-        if (themeIcon) {
-            themeIcon.textContent = '☀️';
-        }
-    }
-    
-    const modal = document.getElementById('generateModal');
-    if (modal) {
-        modal.addEventListener('change', (e) => { if (e.target.name === 'genType') selectGenType(e.target.value); });
-        const fp = document.getElementById('genFilePath'); const dp = document.getElementById('genDirPath'); const btn = document.getElementById('startGenBtn');
-        if (fp) fp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'file' && btn) btn.disabled = !this.value.trim(); });
-        if (dp) dp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'directory' && btn) btn.disabled = !this.value.trim(); });
-    }
-});
-
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeReadme(); closeGenerateModal(); } });
 
 function openInOSM() {
     const lat = document.getElementById('coordLat').value;
@@ -413,7 +429,6 @@ function openInAudacity(path, filename) {
             if (data.error) {
                 alert(`❌ ${data.error}`);
             } else {
-                // Feedback visuel sur le bouton via son ID
                 const btn = document.getElementById('audacityBtn');
                 if (btn) {
                     const originalText = btn.textContent;
@@ -431,4 +446,36 @@ function openInAudacity(path, filename) {
         });
 }
 
-loadStructure();
+// INITIALISATION SÉCURISÉE (remplace le loadStructure() isolé à la fin)
+document.addEventListener('DOMContentLoaded', () => {
+    loadStructure();
+    
+    const searchInput = document.getElementById('searchInput');
+    const spectroFilter = document.getElementById('spectrogramFilter');
+    
+    if (searchInput) searchInput.addEventListener('input', () => applyFilters());
+    if (spectroFilter) spectroFilter.addEventListener('change', () => applyFilters());
+    
+    const modal = document.getElementById('generateModal');
+    if (modal) {
+        modal.addEventListener('change', (e) => { if (e.target.name === 'genType') selectGenType(e.target.value); });
+        const fp = document.getElementById('genFilePath'); const dp = document.getElementById('genDirPath'); const btn = document.getElementById('startGenBtn');
+        if (fp) fp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'file' && btn) btn.disabled = !this.value.trim(); });
+        if (dp) dp.addEventListener('input', function() { if (document.querySelector('input[name="genType"]:checked')?.value === 'directory' && btn) btn.disabled = !this.value.trim(); });
+        modal.onclick = (e) => { if (e.target.id === 'generateModal') closeGenerateModal(); };
+    }
+    
+    const readmeModal = document.getElementById('readmeModal');
+    if (readmeModal) {
+        readmeModal.onclick = (e) => { if (e.target.id === 'readmeModal') closeReadme(); };
+    }
+    
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeReadme(); closeGenerateModal(); } });
+    
+    const savedTheme = localStorage.getItem('birdoteque-theme');
+    if (savedTheme === 'light') {
+        document.body.classList.add('light-theme');
+        const themeIcon = document.getElementById('theme-icon');
+        if (themeIcon) themeIcon.textContent = '☀️';
+    }
+});

@@ -394,6 +394,39 @@ body {
     background: #005A8B;
 }
 
+.filter-select {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #1a1a1a;
+    border: 2px solid #3a3a3a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 13px;
+    outline: none;
+    cursor: pointer;
+}
+
+.filter-select:focus {
+    border-color: #4CAF50;
+}
+
+.filter-select option {
+    background: #2a2a2a;
+    color: #e0e0e0;
+}
+
+body.light-theme .filter-select {
+    background: #f5f5f5;
+    border-color: #ddd;
+    color: #333;
+}
+
+body.light-theme .filter-select option {
+    background: #fff;
+    color: #333;
+}
+
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-track { background: #1a1a1a; }
 ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 5px; }

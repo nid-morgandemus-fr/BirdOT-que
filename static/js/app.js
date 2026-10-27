@@ -89,24 +89,18 @@ function filterTree(searchTerm, spectroFilter = 'all') {
             const keyMatch = key.toLowerCase().includes(term);
             const pathMatch = (parentPath + '/' + key).toLowerCase().includes(term);
             
-            // 1. Filtre texte sur les noms de fichiers
             let filteredAudio = item._audio.filter(a => a.name.toLowerCase().includes(term));
             
-            // 2. Filtre spectrogramme
             if (spectroFilter === 'with') {
                 filteredAudio = filteredAudio.filter(a => a.spectrogram !== null && a.spectrogram !== undefined && a.spectrogram !== '');
             } else if (spectroFilter === 'without') {
                 filteredAudio = filteredAudio.filter(a => a.spectrogram === null || a.spectrogram === undefined || a.spectrogram === '');
             }
             
-            // 3. Récursion sur les sous-dossiers
             let childrenFiltered = hasChildren ? filterNode(item, parentPath + '/' + key) : {};
             const hasValidChildren = Object.keys(childrenFiltered).length > 0;
             
-            // 4. Décision d'inclusion du dossier
             if (keyMatch || pathMatch) {
-                // Le dossier correspond à la recherche texte.
-                // On affiche ses fichiers, MAIS en respectant le filtre spectrogramme !
                 let displayAudio = item._audio;
                 if (spectroFilter === 'with') {
                     displayAudio = displayAudio.filter(a => a.spectrogram !== null && a.spectrogram !== undefined && a.spectrogram !== '');
@@ -122,7 +116,6 @@ function filterTree(searchTerm, spectroFilter = 'all') {
                     if (hasValidChildren) Object.assign(filtered[key], childrenFiltered);
                 }
             } else if (filteredAudio.length > 0 || hasValidChildren) {
-                // Le dossier ne matche pas le texte, mais contient des fichiers qui matchent (texte + spectro)
                 filtered[key] = { 
                     _audio: filteredAudio, 
                     _path: item._path 
@@ -150,7 +143,6 @@ function filterTree(searchTerm, spectroFilter = 'all') {
 }
 
 async function showFile(path, filename, spectrogramFile) {
-    // CORRECTION VITALE : La regex originale sur GitHub était vide (//g) et cassait tout
     const safePath = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilename = filename.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilepath = `${safePath}/${safeFilename}`;
@@ -446,7 +438,13 @@ function openInAudacity(path, filename) {
         });
 }
 
-// INITIALISATION SÉCURISÉE (remplace le loadStructure() isolé à la fin)
+function toggleMenu() {
+    const menu = document.getElementById('mainButtons');
+    const btn = document.getElementById('hamburgerBtn');
+    menu.classList.toggle('show');
+    btn.classList.toggle('active');
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     loadStructure();
     

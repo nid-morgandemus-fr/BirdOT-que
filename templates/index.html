@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BirdOTèque - Bird Song Library</title>
+    <title>BirdOTèque - Song Library</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
@@ -21,7 +21,6 @@
             </select>
         </div>
 
-        <!-- C'est cet élément qui manquait ou était mal orthographié -->
         <div class="tree-container" id="treeContainer"></div>
     </div>
 
@@ -32,15 +31,21 @@
         </div>
     </div>
 
-    <div class="main-buttons">
-        <button class="help-button" onclick="showReadme()">❓ Help</button>
-        <a href="https://github.com/MDitor-map/BirdOT-eque" target="_blank" class="github-button">🐙 View on GitHub</a>
-        <button class="generate-button" onclick="showGenerateModal()">🎨 Generate Spectrograms</button>
+    <div class="main-buttons-wrapper">
+        <button class="hamburger-btn" id="hamburgerBtn" onclick="toggleMenu()" title="Toggle menu">
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+            <span class="hamburger-line"></span>
+        </button>
+        <div class="main-buttons" id="mainButtons">
+            <button class="help-button" onclick="showReadme()">❓ Help</button>
+            <a href="https://github.com/MDitor-map/BirdOT-eque" target="_blank" class="github-button">🐙 View on GitHub</a>
+            <button class="generate-button" onclick="showGenerateModal()">🎨 Generate Spectrograms</button>
+        </div>
     </div>
 
     <div class="copyright">© 2026 Morgan Demus - BirdOTèque</div>
 
-    <!-- Help Modal -->
     <div class="modal" id="readmeModal">
         <div class="modal-content">
             <button class="modal-close" onclick="closeReadme()">×</button>
@@ -50,7 +55,6 @@
         </div>
     </div>
 
-    <!-- Generate Modal -->
     <div class="generate-modal" id="generateModal">
         <div class="generate-modal-content">
             <button class="generate-modal-close" onclick="closeGenerateModal()">×</button>

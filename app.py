@@ -388,13 +388,11 @@ def open_in_audacity(filepath):
     if not file_path.exists():
         return jsonify({'error': 'File not found'}), 404
     
-    # Vérifier qu'Audacity est installé
     import shutil
     audacity_path = shutil.which('audacity')
     if not audacity_path:
-        return jsonify({'error': 'Audacity is not installed. Please install it with: sudo apt install audacity'}), 404
+        return jsonify({'error': 'Audacity is not installed. Please install it'}), 404
     
-    # Lancer Audacity avec le fichier en arrière-plan
     try:
         subprocess.Popen([audacity_path, str(file_path)], 
                         stdout=subprocess.DEVNULL, 

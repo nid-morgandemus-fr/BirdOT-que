@@ -28,7 +28,7 @@ function buildTree() {
 
 function renderTree(tree) {
     const container = document.getElementById('treeContainer');
-    if (!container) return; // Sécurité ajoutée
+    if (!container) return;
     container.innerHTML = '';
     function renderNode(node, element, level = 0) {
         Object.keys(node).forEach(key => {
@@ -167,8 +167,10 @@ async function showFile(path, filename, spectrogramFile) {
     html += `<p><strong>Path:</strong> ${path}/${filename}</p>`;
     html += `<a href="${audioUrl}" download class="download-btn">⬇️ Download Audio</a>`;
     
-    html += `<button id="audacityBtn" onclick="openInAudacity('${safePath}', '${safeFilename}')" class="audacity-btn">🎵 Open in Audacity</button>`;
+    html += `<button id="audacityBtn" onclick="openInAudacity('${safePath}', '${safeFilename}')" class="audacity-btn">🎵 Audacity</button>`;
     if (spectrogramUrl) html += `<a href="${spectrogramUrl}" download class="download-btn">⬇️ Download Spectrogram</a>`;
+    
+    html += `<button id="spectrolipiBtn" onclick="openInSpectrolipi('${safePath}', '${safeFilename}')" class="spectrolipi-btn">🔎​ Spectrolipi</button>`;
     
     html += '<div class="coordinates-form">';
     html += '<h4>📍 Recording Location</h4>';
@@ -454,6 +456,24 @@ function openInAudacity(path, filename) {
         .catch(error => {
             alert(`❌ Error: ${error.message}`);
         });
+}
+
+function openInSpectrolipi(path, filename) {
+    const audioUrl = window.location.origin + `/files/${path}/${filename}`;
+    
+    const spectrolipiUrl = window.location.origin + `/spectrolipi?audio=${encodeURIComponent(audioUrl)}`;
+    window.open(spectrolipiUrl, '_blank');
+    
+    const btn = document.getElementById('spectrolipiBtn');
+    if (btn) {
+        const originalText = btn.textContent;
+        btn.textContent = '✅ Opening...';
+        btn.style.background = '#4CAF50';
+        setTimeout(() => {
+            btn.textContent = originalText;
+            btn.style.background = '#673AB7';
+        }, 2000);
+    }
 }
 
 function toggleMenu() {

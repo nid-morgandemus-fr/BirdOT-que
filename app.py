@@ -11,6 +11,7 @@ import json
 import subprocess
 import time
 from urllib.parse import unquote
+import shutil
 
 app = Flask(__name__)
 REPO_PATH = None
@@ -360,6 +361,55 @@ def get_readme():
             return f"Read error: {str(e)}", 500
     return "README not found", 404
 
+@app.route('/api/open_in_audacity/<path:filepath>')
+def open_in_audacity(filepath):
+    """Ouvre le fichier audio dans Audacity"""
+    if not REPO_PATH:
+        return jsonify({'error': 'Directory not configured'}), 404
+    
+    file_path = Path(REPO_PATH) / filepath
+    if not file_path.exists():
+        return jsonify({'error': 'File not found'}), 404
+    
+    audacity_path = shutil.which('audacity')
+    if not audacity_path:
+        return jsonify({'error': 'Audacity is not installed. Please install it'}), 404
+    
+    try:
+        subprocess.Popen([audacity_path, str(file_path)], 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL)
+        return jsonify({'message': 'Audacity opened successfully'})
+    except Exception as e:
+        return jsonify({'error': f'Failed to open Audacity: {str(e)}'}), 500
+
+@app.route('/spectrolipi')
+@app.route('/spectrolipi/')
+def serve_spectrolipi_proxy():
+    """Sert l'interface locale de Spectrolipi en injectant le script de chargement auto"""
+    html_path = Path(__file__).parent / 'static' / 'spectrolipi' / 'index.html'
+    if not html_path.exists():
+        return "Spectrolipi not found. Please run: git clone https://github.com/nishantnnb/spectrolipi.git static/spectrolipi", 404
+    
+    with open(html_path, 'r', encoding='utf-8') as f:
+        html_content = f.read()
+    
+    inject_script = '<script src="/spectrolipi-inject.js"></script>'
+    if inject_script not in html_content:
+        html_content = html_content.replace('</body>', f'    {inject_script}\n</body>')
+    
+    return html_content, 200, {'Content-Type': 'text/html'}
+
+@app.route('/spectrolipi/<path:filename>')
+def serve_spectrolipi_assets(filename):
+    """Sert les fichiers statiques de Spectrolipi (CSS, JS, images, etc.)"""
+    return send_from_directory('static/spectrolipi', filename)
+
+@app.route('/spectrolipi-inject.js')
+def serve_inject_script():
+    """Sert notre script d'injection externe"""
+    return send_from_directory('static/js', 'spectrolipi-inject.js', mimetype='application/javascript')
+
 def open_browser():
     time.sleep(1.5)
     webbrowser.open('http://localhost:5000')
@@ -386,29 +436,25 @@ def main():
     threading.Thread(target=open_browser, daemon=True).start()
     app.run(host='0.0.0.0', port=5000, debug=False)
 
-@app.route('/api/open_in_audacity/<path:filepath>')
-def open_in_audacity(filepath):
-    """Ouvre le fichier audio dans Audacity"""
-    if not REPO_PATH:
-        return jsonify({'error': 'Directory not configured'}), 404
+@app.route('/<path:filename>')
+def serve_spectrolipi_root_fallback(filename):
+    """
+    Intercepte les requêtes d'assets (JS, CSS, images) à la racine.
+    Spectrolipi utilise des chemins relatifs dans son index.html (ex: src="tf.min.js"),
+    ce qui fait que le navigateur demande http://localhost:5000/tf.min.js.
+    Cette route sert ces fichiers depuis le dossier static/spectrolipi s'ils y existent.
+    """
+    valid_extensions = {'.js', '.css', '.png', '.jpg', '.jpeg', '.svg', '.webp', '.json', '.wasm', '.mp3', '.wav', '.docx'}
+    ext = Path(filename).suffix.lower()
     
-    file_path = Path(REPO_PATH) / filepath
-    
-    if not file_path.exists():
-        return jsonify({'error': 'File not found'}), 404
-    
-    import shutil
-    audacity_path = shutil.which('audacity')
-    if not audacity_path:
-        return jsonify({'error': 'Audacity is not installed. Please install it'}), 404
-    
-    try:
-        subprocess.Popen([audacity_path, str(file_path)], 
-                        stdout=subprocess.DEVNULL, 
-                        stderr=subprocess.DEVNULL)
-        return jsonify({'message': 'Audacity opened successfully'})
-    except Exception as e:
-        return jsonify({'error': f'Failed to open Audacity: {str(e)}'}), 500
+    if ext in valid_extensions:
+        asset_path = Path(__file__).parent / 'static' / 'spectrolipi' / filename
+        if asset_path.is_file():
+            return send_from_directory('static/spectrolipi', filename)
+            
+    # Si ce n'est pas un fichier de Spectrolipi, on laisse Flask retourner une 404 standard
+    from flask import abort
+    abort(404)
 
 if __name__ == '__main__':
     main()

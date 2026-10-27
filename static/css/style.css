@@ -499,6 +499,26 @@ body.light-theme .filter-select option {
     pointer-events: auto;
 }
 
+.spectrolipi-btn {
+    display: inline-block;
+    padding: 10px 20px;
+    background: #673AB7; /* Violet Spectrolipi */
+    color: white;
+    text-decoration: none;
+    border-radius: 6px;
+    margin-top: 10px;
+    margin-right: 5px;
+    transition: background 0.2s, transform 0.2s;
+    cursor: pointer;
+    border: none;
+    font-size: 14px;
+}
+
+.spectrolipi-btn:hover {
+    background: #512DA8;
+    transform: translateY(-2px);
+}
+
 ::-webkit-scrollbar { width: 10px; }
 ::-webkit-scrollbar-track { background: #1a1a1a; }
 ::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 5px; }

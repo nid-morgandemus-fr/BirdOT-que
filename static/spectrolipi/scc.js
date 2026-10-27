@@ -1,0 +1,1547 @@
+// scc.js
+// Spectrogram Cross-Correlation (SCC) auto-annotation
+// UI: Run SCC button opens dialog to configure options and run detections from selected grid rows.
+// Algorithm: generate pitch/time variants of template(s), compute normalized 2D cross-correlation on spectrogram magnitudes,
+// peak-pick with guard bands, convert to time/frequency boxes, NMS by IoU, and insert into the grid.
+
+(function(){
+  const RUN_BTN_ID = 'runSccBtn';
+  const MODAL_ID = 'sccModal';
+  const STYLE_ID = 'sccModalStyles';
+
+  // Small helpers
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const round4 = (v) => Number(v).toFixed(4);
+
+  // Very safe pause helper: attempts to pause playback if available, bounded by timeoutMs
+  async function safePausePlayback(timeoutMs = 800) {
+    try {
+      const holder = (globalThis._playbackScrollJump && typeof globalThis._playbackScrollJump.pause === 'function') ? globalThis._playbackScrollJump :
+                     (globalThis._playback && typeof globalThis._playback.pause === 'function') ? globalThis._playback : null;
+      if (!holder) return;
+      const p = holder.pause && holder.pause.call(holder);
+      if (p && typeof p.then === 'function') {
+        await Promise.race([p, new Promise((_, r) => setTimeout(r, timeoutMs))]).catch(() => {});
+      }
+    } catch (e) {}
+  }
+
+  // Merge adjacent detections if their gap is less than maxGapSec.
+  // Each detection is an object with at least {t1,t2,f1,f2,score}.
+  function mergeDetectionsByGap(dets, maxGapSec){
+    try {
+      const arr = Array.isArray(dets) ? dets.slice() : [];
+      if (arr.length <= 1) return arr;
+      // sort by begin time, then end time
+      arr.sort((a,b) => (a.t1 - b.t1) || (a.t2 - b.t2));
+      const out = [];
+      let cur = { ...arr[0] };
+      for (let i=1;i<arr.length;i++){
+        const nxt = arr[i];
+        const gap = (nxt.t1 - cur.t2);
+        if (gap < maxGapSec){
+          // merge into cur: extend end time, expand freq range, keep max score
+          cur.t2 = Math.max(cur.t2, nxt.t2);
+          cur.f1 = Math.min(cur.f1, nxt.f1);
+          cur.f2 = Math.max(cur.f2, nxt.f2);
+          const s1 = (typeof cur.score === 'number') ? cur.score : Number(cur.score||0);
+          const s2 = (typeof nxt.score === 'number') ? nxt.score : Number(nxt.score||0);
+          cur.score = Math.max(isFinite(s1)?s1:0, isFinite(s2)?s2:0);
+        } else {
+          out.push(cur);
+          cur = { ...nxt };
+        }
+      }
+      out.push(cur);
+      return out;
+    } catch(e){ return Array.isArray(dets) ? dets : []; }
+  }
+
+  function getGridSelectedTemplates() {
+    let rows = [];
+    try {
+      if (window.annotationGrid && typeof window.annotationGrid.getSelectedRows === 'function' && window.annotationGrid.initialized !== false) {
+        rows = window.annotationGrid.getSelectedRows().map(r => r.getData());
+      }
+    } catch (e) { return []; }
+    // Fallback to active edit session if grid selection lags
+    if (rows.length === 0) {
+      try { 
+        const eid = globalThis._editAnnotations && globalThis._editAnnotations.getEditingId(); 
+        if (eid) {
+          const all = globalThis._annotations && typeof globalThis._annotations.getAll === 'function' ? globalThis._annotations.getAll() : [];
+          const found = all.find(x => String(x.id) === String(eid));
+          if (found) rows = [found];
+        }
+      } catch(e){}
+    }
+    return rows;
+  }
+
+  function getSpectroMeta() {
+    return {
+      spectra: globalThis._spectroSpectra || null,
+      bins: globalThis._spectroBins || 0,
+      framesPerSec: globalThis._spectroFramesPerSec || 0,
+      sampleRate: globalThis._spectroSampleRate || 44100
+    };
+  }
+
+  function hzToBin(hz, sr, bins) {
+    const nyq = sr / 2;
+    const frac = clamp(hz / Math.max(1e-9, nyq), 0, 1);
+    return Math.min(bins - 1, Math.max(0, Math.floor(frac * (bins - 1))));
+  }
+  function timeToFrame(t, fps, maxFrames) {
+    const idx = Math.floor(clamp(t, 0, Number.MAX_SAFE_INTEGER) * Math.max(1e-9, fps));
+    if (typeof maxFrames === 'number' && isFinite(maxFrames)) return Math.min(Math.max(0, idx), Math.max(0, maxFrames - 1));
+    return Math.max(0, idx);
+  }
+
+  function extractTemplate2D(spectra, bins, fps, sr, t0, t1, fLow, fHigh) {
+    // Quantize template to exact frame & bin boundaries and add a 1-frame/bin padding to
+    // reduce sensitivity to tiny redraw differences. This makes extraction deterministic
+    // for slightly different user-drawn box coordinates.
+    const b0 = hzToBin(fLow, sr, bins);
+    const b1 = hzToBin(fHigh, sr, bins);
+    let bb0 = Math.min(b0, b1), bb1 = Math.max(b0, b1);
+    const padBins = 1;
+    bb0 = Math.max(0, bb0 - padBins);
+    // Phase align to multiple of 4 so downsampling (sx=4, sy=2) takes exact same pixels
+    bb0 = Math.floor(bb0 / 4) * 4;
+    bb1 = Math.min(bins - 1, bb1 + padBins);
+    const h = Math.max(1, bb1 - bb0 + 1);
+
+    const totalFrames = Math.max(1, Math.floor((spectra.length || 0) / bins));
+    const f0 = timeToFrame(t0, fps, totalFrames);
+    const f1 = timeToFrame(t1, fps, totalFrames);
+    let ff0 = Math.min(f0, f1), ff1 = Math.max(f0, f1);
+    const padFrames = 1;
+    ff0 = Math.max(0, ff0 - padFrames);
+    // Phase align to multiple of 4
+    ff0 = Math.floor(ff0 / 4) * 4;
+    ff1 = Math.min(totalFrames - 1, ff1 + padFrames);
+    const w = Math.max(1, ff1 - ff0 + 1);
+
+    const out = new Float32Array(h * w);
+    for (let x = 0; x < w; x++){
+      const frameIdx = ff0 + x;
+      const base = frameIdx * bins;
+      for (let y = 0; y < h; y++){
+        const binIdx = bb0 + y;
+        out[y * w + x] = spectra[base + binIdx] || 0;
+      }
+    }
+    return { data: out, width: w, height: h, frameStart: ff0, frameEnd: ff1, binStart: bb0, binEnd: bb1 };
+  }
+
+  // Simple resize (bilinear-like along independent axes)
+  function resize2D(arr, w, h, newW, newH) {
+    if (newW === w && newH === h) return { data: arr.slice(0), width: w, height: h };
+    const out = new Float32Array(newW * newH);
+    const sx = (w - 1) / Math.max(1, (newW - 1));
+    const sy = (h - 1) / Math.max(1, (newH - 1));
+    for (let yy = 0; yy < newH; yy++){
+      const srcY = yy * sy;
+      const y0 = Math.floor(srcY), y1 = Math.min(h - 1, y0 + 1);
+      const wy = srcY - y0;
+      for (let xx = 0; xx < newW; xx++){
+        const srcX = xx * sx;
+        const x0 = Math.floor(srcX), x1 = Math.min(w - 1, x0 + 1);
+        const wx = srcX - x0;
+        const a = arr[y0 * w + x0];
+        const b = arr[y0 * w + x1];
+        const c = arr[y1 * w + x0];
+        const d = arr[y1 * w + x1];
+        const top = a + (b - a) * wx;
+        const bot = c + (d - c) * wx;
+        out[yy * newW + xx] = top + (bot - top) * wy;
+      }
+    }
+    return { data: out, width: newW, height: newH };
+  }
+
+  function downsample2D(arr, w, h, strideX, strideY) {
+    const sX = Math.max(1, Math.floor(strideX || 1));
+    const sY = Math.max(1, Math.floor(strideY || 1));
+    const newW = Math.max(1, Math.floor((w + sX - 1) / sX));
+    const newH = Math.max(1, Math.floor((h + sY - 1) / sY));
+    const out = new Float32Array(newW * newH);
+    for (let yy = 0; yy < newH; yy++){
+      const y0 = yy * sY;
+      const y1 = Math.min(h, y0 + sY);
+      for (let xx = 0; xx < newW; xx++){
+        const x0 = xx * sX;
+        const x1 = Math.min(w, x0 + sX);
+        let sum = 0; let cnt = 0;
+        for (let y = y0; y < y1; y++){
+          let off = y * w + x0;
+          for (let x = x0; x < x1; x++) { sum += arr[off++] || 0; cnt++; }
+        }
+        out[yy * newW + xx] = cnt ? (sum / cnt) : 0;
+      }
+    }
+    return { data: out, width: newW, height: newH, strideX: sX, strideY: sY };
+  }
+
+  function meanStd(arr) {
+    const n = arr.length || 1;
+    let sum = 0, sum2 = 0;
+    for (let i = 0; i < n; i++){ const v = arr[i]; sum += v; sum2 += v * v; }
+    const mu = sum / n;
+    const varr = Math.max(0, (sum2 / n) - mu * mu);
+    const sd = Math.sqrt(varr + 1e-12);
+    return { mean: mu, std: sd };
+  }
+
+  function zeroMeanUnit(arr) {
+    const out = new Float32Array(arr.length);
+    const s = meanStd(arr);
+    for (let i = 0; i < arr.length; i++) out[i] = (arr[i] - s.mean) / (s.std || 1e-6);
+    return { data: out, stat: s };
+  }
+
+  // Exact NCC on a same-size image patch vs template (both in full resolution), returns [-1,1]
+  function nccScorePatch(img, iw, ih, x0, y0, tw, th, templ) {
+    if (x0 < 0 || y0 < 0 || x0 + tw > iw || y0 + th > ih) return -1;
+    const n = tw * th;
+    let sumI = 0, sumI2 = 0, sumT = 0, sumT2 = 0, sumIT = 0;
+    for (let yy = 0; yy < th; yy++) {
+      const iOff = (y0 + yy) * iw + x0;
+      const tOff = yy * tw;
+      for (let xx = 0; xx < tw; xx++) {
+        const I = img[iOff + xx];
+        const T = templ[tOff + xx];
+        sumI += I; sumI2 += I * I;
+        sumT += T; sumT2 += T * T;
+        sumIT += I * T;
+      }
+    }
+    const muI = sumI / n;
+    const muT = sumT / n;
+    const sI2 = Math.max(0, sumI2 / n - muI * muI);
+    const sT2 = Math.max(0, sumT2 / n - muT * muT);
+    const sI = Math.sqrt(sI2);
+    const sT = Math.sqrt(sT2);
+    if (sI < 1e-4 || sT < 1e-4) return -1; // too flat, unreliable
+    const num = sumIT / n - muI * muT;
+    return clamp(num / (sI * sT), -1, 1);
+  }
+
+  // Integral image helpers (prefix sum and prefix sum squares)
+  function integralImage(arr, w, h) {
+    const S = new Float64Array((w + 1) * (h + 1));
+    for (let y = 1; y <= h; y++){
+      let rowSum = 0;
+      for (let x = 1; x <= w; x++){
+        const v = arr[(y - 1) * w + (x - 1)] || 0;
+        rowSum += v;
+        const idx = y * (w + 1) + x;
+        S[idx] = S[(y - 1) * (w + 1) + x] + rowSum;
+      }
+    }
+    return { data: S, width: w + 1, height: h + 1 };
+  }
+  function rectSum(S, w1, h1, x, y, rw, rh) {
+    // S is (w1 x h1) prefix array, arr was (w x h); x,y 1-based offset inside S
+    const x2 = x + rw;
+    const y2 = y + rh;
+    const A = S[y * w1 + x];
+    const B = S[y * w1 + x2];
+    const C = S[y2 * w1 + x];
+    const D = S[y2 * w1 + x2];
+    return D - B - C + A;
+  }
+
+  // NCC: normalized cross-correlation (zero-mean) using integral images for patch mean/std and naive dot for sum(I*T)
+  // Optional precomputed integrals (precomputed = { S, S2 }) avoid recomputing them per call.
+  async function nccMap(image, iw, ih, templZ, tw, th, yieldEvery = 2000, precomputed) {
+    const outW = Math.max(1, iw - tw + 1);
+    const outH = Math.max(1, ih - th + 1);
+    const out = new Float32Array(outW * outH);
+
+    let S, S2;
+    if (precomputed && precomputed.S && precomputed.S2 && precomputed.S.width === (iw + 1)) {
+      S = precomputed.S;
+      S2 = precomputed.S2;
+    } else {
+      S = integralImage(image, iw, ih);
+      const imageSq = new Float32Array(iw * ih);
+      for (let i = 0; i < image.length; i++) { const v = image[i]; imageSq[i] = v * v; }
+      S2 = integralImage(imageSq, iw, ih);
+    }
+
+    const templStat = meanStd(templZ); // templZ is already zero-mean if from zeroMeanUnit, but compute std for safety
+    const tStd = Math.max(templStat.std, 1e-6);
+    const n = tw * th;
+
+    let iter = 0;
+    
+    // Column-major traversal
+    for (let x = 0; x < outW; x++){
+      const sx = x + 1;
+      
+      for (let y = 0; y < outH; y++){
+        const sy = y + 1;
+        const sumI = rectSum(S.data, S.width, S.height, sx, sy, tw, th);
+        const sumI2 = rectSum(S2.data, S2.width, S2.height, sx, sy, tw, th);
+        const muI = sumI / n;
+        const varI = Math.max(0, sumI2 / n - muI * muI);
+        const sI = Math.sqrt(varI + 1e-12);
+        
+        let dot = 0;
+        // dot(I - muI, Tz) naive nested loop
+        for (let yy = 0; yy < th; yy++){
+          const iOff = (y + yy) * iw + x;
+          const tOff = yy * tw;
+          for (let xx = 0; xx < tw; xx++){
+            dot += (image[iOff + xx] - muI) * templZ[tOff + xx];
+          }
+        }
+        
+        const denom = (sI * tStd * n) || 1e-9;
+        const score = clamp(dot / denom, -1, 1);
+        out[y * outW + x] = score;
+        
+        iter++;
+        if ((iter % yieldEvery) === 0) await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    return { data: out, width: outW, height: outH };
+  }
+
+  // Peak picking with guard bands; deterministic ordering (score desc, then x asc, then y asc)
+  function pickPeaks(corr, cw, ch, threshold, guardX, guardY, maxPeaks = 10000) {
+    const peaks = [];
+    for (let y = 0; y < ch; y++){
+      for (let x = 0; x < cw; x++){
+        const s = corr[y * cw + x];
+        if (s < threshold) continue;
+        peaks.push({ x, y, s });
+      }
+    }
+    peaks.sort((a,b) => (b.s - a.s) || (a.x - b.x) || (a.y - b.y));
+    const out = [];
+    const taken = new Uint8Array(cw * ch);
+    const gx = Math.max(1, Math.floor(guardX));
+    const gy = Math.max(1, Math.floor(guardY));
+    for (const p of peaks) {
+      let suppressed = false;
+      for (let yy = Math.max(0, p.y - gy); yy <= Math.min(ch - 1, p.y + gy) && !suppressed; yy++){
+        for (let xx = Math.max(0, p.x - gx); xx <= Math.min(cw - 1, p.x + gx); xx++){
+          if (taken[yy * cw + xx]) { suppressed = true; break; }
+        }
+      }
+      if (suppressed) continue;
+      out.push(p);
+      // mark guard area
+      for (let yy = Math.max(0, p.y - gy); yy <= Math.min(ch - 1, p.y + gy); yy++){
+        for (let xx = Math.max(0, p.x - gx); xx <= Math.min(cw - 1, p.x + gx); xx++){
+          taken[yy * cw + xx] = 1;
+        }
+      }
+      if (out.length >= maxPeaks) break;
+    }
+    return out;
+  }
+
+  function iouRect(a, b) {
+    const x1 = Math.max(a.t1, b.t1);
+    const y1 = Math.max(a.f1, b.f1);
+    const x2 = Math.min(a.t2, b.t2);
+    const y2 = Math.min(a.f2, b.f2);
+    const iw = Math.max(0, x2 - x1);
+    const ih = Math.max(0, y2 - y1);
+    const inter = iw * ih;
+    const areaA = Math.max(0, (a.t2 - a.t1)) * Math.max(0, (a.f2 - a.f1));
+    const areaB = Math.max(0, (b.t2 - b.t1)) * Math.max(0, (b.f2 - b.f1));
+    const uni = Math.max(1e-12, areaA + areaB - inter);
+    return inter / uni;
+  }
+
+  function nms(boxes, iouThresh = 0.3, minDistSec = 0) {
+    // boxes sorted by score desc prior to call
+    const kept = [];
+    for (const b of boxes) {
+      let mergedInto = null;
+      for (const k of kept) {
+        if (iouRect(b, k) > iouThresh) {
+          // keep highest score (already in kept), but merge contributing template IDs
+          try {
+            const a = new Set(k.templateIds || []);
+            (b.templateIds || []).forEach(id => a.add(id));
+            k.templateIds = Array.from(a);
+          } catch (e) {}
+          mergedInto = k;
+          break;
+        }
+        // Strict timeline gap enforcement
+        if (minDistSec > 0) {
+          const gap = Math.max(0, Math.max(b.t1, k.t1) - Math.min(b.t2, k.t2));
+          if (gap < minDistSec) {
+            mergedInto = k;
+            break;
+          }
+        }
+      }
+      if (!mergedInto) kept.push(b);
+    }
+    return kept;
+  }
+
+  function parseBandMask(str) {
+    // format: "0-200, 4000-5000" (Hz)
+    if (!str) return [];
+    return String(str).split(',').map(s => s.trim()).map(tok => {
+      const m = tok.match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)/);
+      if (!m) return null;
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      if (!isFinite(a) || !isFinite(b)) return null;
+      return { f1: Math.min(a,b), f2: Math.max(a,b) };
+    }).filter(Boolean);
+  }
+
+  function intersectsBandMask(f1, f2, mask) {
+    if (!Array.isArray(mask) || !mask.length) return false;
+    for (const r of mask) {
+      const lo = Math.max(f1, r.f1);
+      const hi = Math.min(f2, r.f2);
+      if (hi > lo) return true;
+    }
+    return false;
+  }
+
+  function buildModal() {
+    if (document.getElementById(MODAL_ID)) return document.getElementById(MODAL_ID);
+    if (!document.getElementById(STYLE_ID)) {
+  const st = document.createElement('style');
+    st.id = STYLE_ID;
+    st.textContent = `
+#${MODAL_ID} { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; z-index: 2147483600; background: rgba(0,0,0,0.45); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);} 
+  #${MODAL_ID} .card { position: relative; width: 96%; max-width: 760px; max-height: 90vh; overflow: auto; background: #0f1216; color: #fff; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 12px 36px rgba(0,0,0,0.35); padding: 14px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+  #${MODAL_ID} h3 { margin: 4px 0 10px 0; font-size: 16px; font-weight: 600; }
+  #${MODAL_ID} .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; align-items: start; }
+  /* Each .row is a horizontal label+control pair so the form appears as two compact columns */
+  #${MODAL_ID} .row { display: flex; flex-direction: row; align-items: center; gap: 8px; padding: 6px 0; }
+  #${MODAL_ID} label { font-size: 12px; color: #cbd5e1; margin: 0; display: inline-block; flex: 0 0 36%; min-width: 110px; }
+  /* controls occupy remaining space but are capped to avoid overly wide inputs */
+  #${MODAL_ID} input[type="number"], #${MODAL_ID} input[type="text"], #${MODAL_ID} select {
+    flex: 1 1 160px; max-width: 260px; box-sizing: border-box; background: #0b0e12; color: #fff; border: 1px solid #1f2937; border-radius: 6px; padding: 6px 8px; font-size: 13px;
+  }
+  #${MODAL_ID} input[type="number"]::-webkit-outer-spin-button, #${MODAL_ID} input[type="number"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  /* Mobile: stack label above control and use full width */
+  @media (max-width: 640px) { 
+    #${MODAL_ID} .grid { grid-template-columns: 1fr; }
+    #${MODAL_ID} .row { flex-direction: column; align-items: stretch; }
+    #${MODAL_ID} label { flex: 0 0 auto; min-width: 0; margin-bottom: 6px; }
+    #${MODAL_ID} input[type="number"], #${MODAL_ID} input[type="text"], #${MODAL_ID} select { max-width: 100%; }
+  }
+  #${MODAL_ID} .actions { margin-top: 12px; display: flex; gap: 10px; justify-content: flex-end; }
+  #${MODAL_ID} .btn { background: #2196F3; color: #fff; border: none; border-radius: 6px; padding: 8px 12px; font-size: 13px; cursor: pointer; }
+  #${MODAL_ID} .btn[disabled] { opacity: 0.6; cursor: not-allowed; }
+  #${MODAL_ID} .progress { margin-top: 6px; font-size: 12px; color: #9ca3af; }
+  @media (max-width: 640px) { #${MODAL_ID} .grid { grid-template-columns: 1fr; } }
+        `;
+        document.head.appendChild(st);
+      }
+
+    const wrap = document.createElement('div');
+    wrap.id = MODAL_ID;
+    wrap.innerHTML = `
+      <div class="card" role="dialog" aria-modal="true" aria-label="Run SCC options">
+        <h3>Run Spectrogram Cross-Correlation (SCC)</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <div style="font-size:13px;color:#cbd5e1;font-weight:600">Detect similar shapes</div>
+          <div>
+            <button id="scc-scan" class="btn" style="background:#10b981;padding:6px 10px;font-size:13px;">Detect similar shapes</button>
+            <button id="scc-stop" class="btn" style="background:#ef4444;padding:6px 10px;font-size:13px;display:none;margin-left:6px;">Stop</button>
+          </div>
+        </div>
+
+  <div style="margin-bottom:8px;color:#f1f5f9;font-size:13px">Note: Auto annotations may not be accurate. Please review the results carefully and do the necessary edits.</div>
+
+        <div class="grid">
+          <div class="row">
+            <label style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="scc-mindist-enable"> Min distance (sec)</label>
+            <input id="scc-mindist" type="number" min="0" step="any" disabled placeholder="e.g. 0.5" style="background:#071722;border:1px solid #1f2937;color:#9ca3af;padding:4px 8px;border-radius:4px;width:100%;">
+          </div>
+          <div class="row">
+            <label for="scc-minfreq">Frequency include: Min (Hz)</label>
+            <input id="scc-minfreq" type="number" min="0" step="1" value="0">
+          </div>
+          <div class="row">
+            <label for="scc-maxfreq">Frequency include: Max (Hz)</label>
+            <input id="scc-maxfreq" type="number" min="0" step="1" value="22050">
+          </div>
+        </div>
+  <div class="progress" id="scc-progress" aria-live="polite"></div>
+  <div class="progress" id="scc-timer" style="margin-top:2px; font-weight:bold; color:#10b981;"></div>
+  <div id="scc-presets-area" style="margin-top:8px;margin-bottom:8px;display:none;background:#071018;padding:8px;border-radius:6px;border:1px solid rgba(255,255,255,0.03)"></div>
+  <div class="actions" style="align-items:center;">
+          <label id="scc-merge-label" title="This combines the annotations with distance less than the input duration." style="display:flex;align-items:center;gap:8px;margin-right:auto;font-size:13px;color:#cbd5e1;white-space:nowrap">
+            <input type="checkbox" id="scc-merge" />
+            <span>Merge detections below</span>
+            <input id="scc-merge-gap" type="number" min="0" max="10" step="0.1" value="1.0" style="width:68px;background:#0b1523;border:1px solid rgba(255,255,255,0.08);color:#e5e7eb;padding:4px 6px;border-radius:4px"> 
+            <span>sec apart</span>
+          </label>
+        </div>
+        <!-- top-right standard close button (X) -->
+        <button id="scc-close-x" aria-label="Close" title="Close" style="position:absolute;top:10px;right:12px;background:transparent;border:none;color:#9ca3af;font-size:20px;line-height:1;cursor:pointer;padding:6px;border-radius:6px">&times;</button>
+      </div>`;
+    document.body.appendChild(wrap);
+    return wrap;
+  }
+
+  function showModal() { const m = buildModal(); m.style.display = 'flex'; return m; }
+  function hideModal() { const m = document.getElementById(MODAL_ID); if (m) m.style.display = 'none'; }
+  // prevent background scrolling when modal is open
+  const __bodyOverflowBackup = { val: null };
+  // modal scroll interception handlers (prevent background scroll while modal open)
+  const __scc_modal_handlers = { wheel: null, touch: null };
+  // last scan state (keeps preset scan results and last selected preset index)
+  let __scc_lastScanRows = null;
+  let __scc_lastSelectedPresetIndex = null;
+  let __scc_lastScanParams = null;
+  // active scan abort token (used to cancel long-running preset scans)
+  let __scc_currentScan = null;
+  function _showModal() {
+    const m = showModal();
+    __bodyOverflowBackup.val = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    // add capturing handlers to stop scroll events from reaching background when the event target is outside the modal card
+    try {
+      const wheelHandler = function (ev) {
+        try {
+          const modal = document.getElementById(MODAL_ID);
+          if (!modal) return;
+          const card = modal.querySelector('.card');
+          if (!card) return;
+          // If the wheel target is outside the card, always prevent background scroll
+          if (!card.contains(ev.target)) { ev.preventDefault(); ev.stopPropagation(); return; }
+
+          // If the wheel target is inside the card, allow the scroll only if some ancestor
+          // inside the card can actually scroll in the wheel direction. Otherwise prevent it
+          // so the page behind doesn't move when card content is already at its limit.
+          let node = ev.target;
+          let allow = false;
+          const deltaY = ev.deltaY || 0;
+          while (node && node !== card) {
+            try {
+              const style = window.getComputedStyle(node);
+              const overflowY = style.overflowY;
+              const canScroll = (overflowY === 'auto' || overflowY === 'scroll');
+              if (canScroll) {
+                const st = node.scrollTop || 0;
+                const sh = node.scrollHeight || 0;
+                const ch = node.clientHeight || 0;
+                if (deltaY < 0 && st > 0) { allow = true; break; }
+                if (deltaY > 0 && (st + ch) < sh) { allow = true; break; }
+              }
+            } catch (e) {}
+            node = node.parentElement;
+          }
+          if (!allow) { ev.preventDefault(); ev.stopPropagation(); }
+        } catch (e) {}
+      };
+      const touchHandler = function (ev) {
+        try {
+          const modal = document.getElementById(MODAL_ID);
+          if (!modal) return;
+          const card = modal.querySelector('.card');
+          if (!card) return;
+          if (!card.contains(ev.target)) { ev.preventDefault(); ev.stopPropagation(); }
+        } catch (e) {}
+      };
+      __scc_modal_handlers.wheel = wheelHandler;
+      __scc_modal_handlers.touch = touchHandler;
+      document.addEventListener('wheel', wheelHandler, { passive: false, capture: true });
+      document.addEventListener('touchmove', touchHandler, { passive: false, capture: true });
+    } catch (e) {}
+    return m;
+  }
+  function _hideModal() {
+    const m = document.getElementById(MODAL_ID);
+    if (m) m.style.display = 'none';
+    // cancel any ongoing preset scan when modal is closed
+    try { if (__scc_currentScan) __scc_currentScan.cancelled = true; } catch (e) {}
+    document.body.style.overflow = __bodyOverflowBackup.val || '';
+    try {
+      if (__scc_modal_handlers.wheel) {
+        document.removeEventListener('wheel', __scc_modal_handlers.wheel, { capture: true });
+        __scc_modal_handlers.wheel = null;
+      }
+      if (__scc_modal_handlers.touch) {
+        document.removeEventListener('touchmove', __scc_modal_handlers.touch, { capture: true });
+        __scc_modal_handlers.touch = null;
+      }
+    } catch (e) {}
+    // If the UI is currently in 'create' mode, switch to 'edit' after closing SCC modal
+    try {
+      const wrap = document.getElementById('createEditToggle');
+      if (wrap && String(wrap.dataset.mode || '').toLowerCase() === 'create') {
+        wrap.dispatchEvent(new CustomEvent('mode-change', { detail: { mode: 'edit' }, bubbles: true }));
+      }
+    } catch (e) {}
+  }
+  function setProgress(txt){ const el = document.getElementById('scc-progress'); if (el) el.textContent = String(txt || ''); }
+  function setDisabled(dis){ const run = document.getElementById('scc-run'); const cancel = document.getElementById('scc-cancel'); if (run) run.disabled = !!dis; if (cancel) cancel.disabled = !!dis; }
+
+  function computeQualityStrides(quality){
+    switch(String(quality||'balanced')){
+      case 'fast': return { sx: 3, sy: 3 };
+      case 'accurate': return { sx: 1, sy: 1 };
+      default: return { sx: 2, sy: 2 };
+    }
+  }
+
+  // Lightweight detection helper usable for trial runs (returns counts and candidate list)
+  async function detectCandidatesForParams(meta, extractSearch, templatesToUse, localOpts, allowLowVar, abortToken) {
+    const tStart = Date.now();
+    const found = [];
+    let coarse = 0, rawc = 0;
+    let variantsTried = 0, skippedLowVar = 0, skippedTooLarge = 0;
+    const qualityStrides = computeQualityStrides(localOpts.quality);
+      // Force a coarse downsample for scanning to bound runtime even when quality='accurate'
+      const coarseSX = Math.max(1, Number(localOpts.coarseSX) || Math.max(2, qualityStrides.sx));
+      const coarseSY = Math.max(1, Number(localOpts.coarseSY) || Math.max(2, qualityStrides.sy));
+      const localSearch = downsample2D(extractSearch.data, extractSearch.width, extractSearch.height, coarseSX, coarseSY);
+      // Precompute integrals for localSearch so template variants reuse them
+      const __precomp = (function(){
+        try {
+          const imageSq = new Float32Array(localSearch.data.length);
+          for (let i = 0; i < localSearch.data.length; i++) { const v = localSearch.data[i]; imageSq[i] = v * v; }
+          const S = integralImage(localSearch.data, localSearch.width, localSearch.height);
+          const S2 = integralImage(imageSq, localSearch.width, localSearch.height);
+          return { S, S2 };
+        } catch(e) { return null; }
+      })();
+    const localEnergyThresh = percentile(localSearch.data, localOpts.energyPct);
+    const localPitchScales = buildScales(localOpts.pitchTolPct, localOpts.pitchSteps);
+    const localTimeScales = buildScales(localOpts.timeTolPct, localOpts.timeSteps);
+
+    let jumpDistX = 0;
+    try {
+      const enableEl = document.getElementById('scc-mindist-enable');
+      const distEl = document.getElementById('scc-mindist');
+      if (enableEl && enableEl.checked && distEl && distEl.value) {
+        const sec = parseFloat(distEl.value) || 0;
+        if (sec > 0 && meta && meta.framesPerSec) {
+           const originalPixels = sec * meta.framesPerSec;
+           jumpDistX = Math.floor(originalPixels / coarseSX);
+        }
+      }
+    } catch (e) {}
+
+
+
+    const tasks = [];
+    for (let ti = 0; ti < templatesToUse.length; ti++){
+      if (abortToken && abortToken.cancelled) break;
+      const Tbase = templatesToUse[ti];
+      for (let ps = 0; ps < localPitchScales.length; ps++){
+        for (let ts = 0; ts < localTimeScales.length; ts++){
+          const sF = localPitchScales[ps];
+          const sT = localTimeScales[ts];
+          const newH = Math.max(3, Math.round(Tbase.height * sF));
+          const newW = Math.max(3, Math.round(Tbase.width * sT));
+          const Tscaled = resize2D(Tbase.data, Tbase.width, Tbase.height, newW, newH);
+          const preStat = meanStd(Tscaled.data);
+          variantsTried++;
+          
+          if (!allowLowVar) {
+            const varThresh = 1e-3;
+            if (preStat.std < varThresh) { skippedLowVar++; continue; }
+          }
+          const Tds = downsample2D(Tscaled.data, Tscaled.width, Tscaled.height, coarseSX, coarseSY);
+          if (localSearch.width < Tds.width || localSearch.height < Tds.height) { skippedTooLarge++; continue; }
+          const Tnorm = zeroMeanUnit(Tds.data);
+          const TfullZ = zeroMeanUnit(Tscaled.data);
+
+          const guardX = Math.max(2, Math.floor(Tds.width * 0.9));
+          const guardY = Math.max(2, Math.floor(Tds.height * 0.7));
+          const maxPeaks = (localOpts && Number(localOpts.maxCandidates)) ? Math.max(1, Number(localOpts.maxCandidates)) : 50000;
+          const coarseThresh = (typeof localOpts.coarseThresh === 'number') ? Math.max(-1, Math.min(1, localOpts.coarseThresh)) : 0;
+
+          tasks.push({
+            Tbase, sF, sT, Tscaled, TfullZ, Tds, Tnorm,
+            guardX, guardY, maxPeaks, coarseThresh,
+            jumpDistX, threshold: localOpts.threshold || 0
+          });
+        }
+      }
+    }
+
+    let coresUsed = 1;
+
+    if (abortToken && abortToken.cancelled) {
+      const elapsedMs = Date.now() - tStart;
+      return { detections: found, coarsePeaks: coarse, rawCandidates: rawc, variantsTried, skippedLowVar, skippedTooLarge, elapsedMs, aborted: true, coresUsed };
+    }
+
+
+      const maxWorkers = Math.max(1, (navigator.hardwareConcurrency || 4) - 1);
+      coresUsed = Math.min(maxWorkers, tasks.length);
+      const workerPool = Array.from({length: coresUsed}, () => new Worker(getWorkerUrl()));
+      
+      await new Promise((resolve) => {
+        let completed = 0;
+        let nextIdx = 0;
+        function dispatchNext(worker) {
+          if (abortToken && abortToken.cancelled) { resolve(); return; }
+          if (nextIdx >= tasks.length) {
+            if (completed === tasks.length) resolve();
+            return;
+          }
+          const tIdx = nextIdx++;
+          const t = tasks[tIdx];
+          worker.onmessage = (e) => {
+            t.peaks = e.data.success ? e.data.peaks : [];
+            completed++;
+            dispatchNext(worker);
+          };
+          worker.postMessage({
+            id: tIdx,
+            image: localSearch.data, iw: localSearch.width, ih: localSearch.height,
+            templZ: t.Tnorm.data, tw: t.Tds.width, th: t.Tds.height,
+            yieldEvery: 50000, precomputed: __precomp,
+            jumpDistX: t.jumpDistX, threshold: t.threshold,
+            guardX: t.guardX, guardY: t.guardY, maxPeaks: t.maxPeaks, coarseThresh: t.coarseThresh
+          });
+        }
+        workerPool.forEach(w => dispatchNext(w));
+      });
+      workerPool.forEach(w => w.terminate());
+
+
+    for (const t of tasks) {
+      if (abortToken && abortToken.cancelled) break;
+      const peaks = t.peaks || [];
+      coarse += peaks.length;
+
+      const defaultRefineCount = Math.max(200, Math.floor(peaks.length * 0.05));
+      const maxRefine = (localOpts && Number(localOpts.maxRefine)) ? Math.max(1, Number(localOpts.maxRefine)) : Math.min(peaks.length, defaultRefineCount);
+      for (let pi = 0; pi < peaks.length && pi < maxRefine; pi++) {
+        const p = peaks[pi];
+        const x_ds = p.x; const y_ds = p.y;
+        const w_ds = t.Tds.width; const h_ds = t.Tds.height;
+        const x0_img = x_ds * coarseSX;
+        const y0_img = y_ds * coarseSY;
+
+        const frameStart = extractSearch.frameStart + x0_img;
+        const frameEnd = frameStart + (w_ds * coarseSX) - 1;
+        const binStart = extractSearch.binStart + y0_img;
+        const binEnd = binStart + (h_ds * coarseSY) - 1;
+
+        const tStartPeak = frameStart / Math.max(1e-9, meta.framesPerSec);
+        const tEndPeak = (frameEnd + 1) / Math.max(1e-9, meta.framesPerSec);
+        const nyq = meta.sampleRate / 2;
+        const fLow = (binStart / Math.max(1, meta.bins - 1)) * nyq;
+        const fHigh = (binEnd / Math.max(1, meta.bins - 1)) * nyq;
+
+        const durMs = Math.max(0, (tEndPeak - tStartPeak) * 1000);
+        if (durMs < (localOpts.minDurMs || 0)) continue;
+        if (typeof localOpts.minFreq === 'number' && typeof localOpts.maxFreq === 'number') {
+          if (fHigh < localOpts.minFreq || fLow > localOpts.maxFreq) continue;
+        }
+
+        let eSum = 0, eCount = 0;
+        for (let yy = 0; yy < h_ds; yy++){
+          const imgOff = (y_ds + yy) * localSearch.width + x_ds;
+          for (let xx = 0; xx < w_ds; xx++){ eSum += localSearch.data[imgOff + xx] || 0; eCount++; }
+        }
+        const eMean = eSum / Math.max(1, eCount);
+        if (eMean < localEnergyThresh) continue;
+
+        const fineScore = nccScorePatch(
+          extractSearch.data, extractSearch.width, extractSearch.height,
+          x0_img, y0_img, t.Tscaled.width, t.Tscaled.height, t.TfullZ.data
+        );
+        if (!(fineScore > -0.999)) continue;
+
+        rawc++;
+        found.push({ t1: tStartPeak, t2: tEndPeak, f1: fLow, f2: fHigh, score: fineScore, variant: { pitchScale: t.sF, timeScale: t.sT }, templateIds: t.Tbase.srcIdList.slice() });
+      }
+    }
+    const elapsedMs = Date.now() - tStart;
+    return { detections: found, coarsePeaks: coarse, rawCandidates: rawc, variantsTried, skippedLowVar, skippedTooLarge, elapsedMs, coresUsed };
+  }
+
+  function buildScales(tolPct, stepsOdd){
+    const tol = Math.max(0, Number(tolPct)||0) / 100;
+    let steps = Math.max(1, Math.min(11, Math.round(Number(stepsOdd)||1)));
+    if ((steps % 2) === 0) steps += 1; // force odd
+    if (steps <= 1 || tol <= 0) return [1.0];
+    const half = (steps - 1) / 2;
+    const arr = [];
+    for (let i = -half; i <= half; i++) { arr.push(1.0 + (i * tol / half)); }
+    return arr;
+  }
+
+  function composeTemplates(templates, mode){
+    if (!templates.length || mode === 'none') return null;
+    const ref = templates[0];
+    const tw = ref.width, th = ref.height;
+    const mats = templates.map(t => (t.width === tw && t.height === th) ? t.data : resize2D(t.data, t.width, t.height, tw, th).data);
+    const out = new Float32Array(tw * th);
+    if (mode === 'mean') {
+      for (let i = 0; i < out.length; i++){
+        let s = 0; for (let k = 0; k < mats.length; k++) s += mats[k][i];
+        out[i] = s / mats.length;
+      }
+    } else {
+      const tmp = new Float32Array(mats.length);
+      for (let i = 0; i < out.length; i++){
+        for (let k = 0; k < mats.length; k++) tmp[k] = mats[k][i];
+        // median
+        const arr = Array.from(tmp).sort((a,b)=>a-b);
+        out[i] = arr[Math.floor(arr.length/2)];
+      }
+    }
+    return { data: out, width: tw, height: th };
+  }
+
+  function percentile(arr, p){
+    if (!arr.length) return 0;
+    const a = Array.from(arr).sort((x,y)=>x-y);
+    const idx = clamp(Math.floor((p/100) * (a.length-1)), 0, a.length-1);
+    return a[idx];
+  }
+
+  let __workerUrlCache = null;
+  function getWorkerUrl() {
+    if (__workerUrlCache) return __workerUrlCache;
+    const workerScriptCode = `
+      const clamp = ${clamp.toString()};
+      const integralImage = ${integralImage.toString()};
+      const rectSum = ${rectSum.toString()};
+      const meanStd = ${meanStd.toString()};
+      const nccMap = ${nccMap.toString()};
+      const pickPeaks = ${pickPeaks.toString()};
+
+      self.onmessage = async function(e) {
+        const { id, image, iw, ih, templZ, tw, th, yieldEvery, precomputed, jumpDistX, threshold, guardX, guardY, maxPeaks, coarseThresh } = e.data;
+        try {
+          const res = await nccMap(image, iw, ih, templZ, tw, th, yieldEvery, precomputed, jumpDistX, threshold);
+          const peaks = pickPeaks(res.data, res.width, res.height, coarseThresh, guardX, guardY, maxPeaks);
+          self.postMessage({ id, success: true, peaks });
+        } catch(err) {
+          self.postMessage({ id, success: false, error: err.toString() });
+        }
+      };
+    `;
+    const blob = new Blob([workerScriptCode], { type: 'application/javascript' });
+    __workerUrlCache = URL.createObjectURL(blob);
+    return __workerUrlCache;
+  }
+
+  // Small UI: create a circular 5-segment overlay to show preset scan progress
+  function createScanOverlay(parentEl, totalSegments) {
+    try {
+      if (!parentEl) return null;
+      const wrap = document.createElement('div');
+      wrap.className = 'scc-scan-overlay';
+      wrap.style.position = 'fixed';
+      wrap.style.inset = '0';
+      wrap.style.zIndex = '2147483647';
+      wrap.style.display = 'flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.justifyContent = 'center';
+      wrap.style.pointerEvents = 'none';
+
+  const box = document.createElement('div');
+  box.className = 'scc-scan-box';
+  box.style.pointerEvents = 'auto';
+  // make a horizontal rectangle: spinner left, logo middle, tip right
+  box.style.width = '580px';
+  box.style.height = '120px';
+  box.style.display = 'flex';
+  box.style.flexDirection = 'row';
+  box.style.alignItems = 'center';
+  box.style.justifyContent = 'flex-start';
+  box.style.background = 'rgba(6,8,10,0.80)';
+  box.style.borderRadius = '10px';
+  box.style.padding = '12px 14px';
+  box.style.gap = '8px';
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  // smaller circular spinner on the left
+  svg.setAttribute('width','96'); svg.setAttribute('height','96'); svg.setAttribute('viewBox','0 0 96 96');
+
+  const cx = 48, cy = 48, rOut = 42, rIn = 28;
+      const segs = [];
+      function wedgePath(a0, a1) {
+        const large = (a1 - a0) > Math.PI ? 1 : 0;
+        const x0 = cx + rOut * Math.cos(a0);
+        const y0 = cy + rOut * Math.sin(a0);
+        const x1 = cx + rOut * Math.cos(a1);
+        const y1 = cy + rOut * Math.sin(a1);
+        const xi1 = cx + rIn * Math.cos(a1);
+        const yi1 = cy + rIn * Math.sin(a1);
+        const xi0 = cx + rIn * Math.cos(a0);
+        const yi0 = cy + rIn * Math.sin(a0);
+        return `M ${x0} ${y0} A ${rOut} ${rOut} 0 ${large} 1 ${x1} ${y1} L ${xi1} ${yi1} A ${rIn} ${rIn} 0 ${large} 0 ${xi0} ${yi0} Z`;
+      }
+
+      for (let i = 0; i < Math.max(1, totalSegments || 5); i++) {
+        const a0 = (i/totalSegments) * Math.PI * 2 - Math.PI/2;
+        const a1 = ((i+1)/totalSegments) * Math.PI * 2 - Math.PI/2;
+        const p = document.createElementNS(svgNS,'path');
+        p.setAttribute('d', wedgePath(a0,a1));
+        p.setAttribute('fill','#334155');
+        p.setAttribute('stroke','rgba(255,255,255,0.03)');
+        p.style.transition = 'fill 180ms linear';
+        p.dataset.idx = String(i);
+        svg.appendChild(p);
+        segs.push(p);
+      }
+
+      const inner = document.createElementNS(svgNS,'circle');
+      inner.setAttribute('cx',String(cx)); inner.setAttribute('cy',String(cy)); inner.setAttribute('r',String(rIn-6));
+      inner.setAttribute('fill','#071018');
+      svg.appendChild(inner);
+
+      // Left column: spinner with status below it
+      const leftCol = document.createElement('div');
+      leftCol.style.display = 'flex';
+      leftCol.style.flexDirection = 'column';
+      leftCol.style.alignItems = 'center';
+      leftCol.style.justifyContent = 'center';
+      leftCol.style.gap = '6px';
+      leftCol.style.flex = '0 0 auto';
+
+      const statusLabel = document.createElement('div');
+      statusLabel.className = 'scc-scan-label';
+      statusLabel.style.color = '#cbd5e1';
+      statusLabel.style.fontSize = '13px';
+      statusLabel.style.textAlign = 'center';
+      statusLabel.textContent = `Scanning 0 / ${totalSegments}`;
+
+      leftCol.appendChild(svg);
+      leftCol.appendChild(statusLabel);
+
+      // Right column: logo only (closer to spinner)
+      const rightCol = document.createElement('div');
+      rightCol.style.display = 'flex';
+      rightCol.style.flexDirection = 'column';
+      rightCol.style.alignItems = 'center';
+      rightCol.style.justifyContent = 'center';
+      rightCol.style.gap = '6px';
+      rightCol.style.flex = '0 0 auto';
+      rightCol.style.minWidth = '80px';
+
+      // Add branding logo into the right column (non-interactive)
+      try {
+        const logoImg = document.createElement('img');
+        logoImg.className = 'scc-scan-logo';
+        logoImg.src = '002LogoWOname_small.png';
+        logoImg.alt = 'Logo';
+        logoImg.style.pointerEvents = 'none';
+        logoImg.style.display = 'block';
+        logoImg.style.margin = '0 auto';
+        logoImg.style.maxWidth = '160px';
+        logoImg.style.maxHeight = '60px';
+        logoImg.style.objectFit = 'contain';
+        rightCol.appendChild(logoImg);
+      } catch (e) {}
+  
+        // Tip column: rightmost area
+        const tipCol = document.createElement('div');
+        tipCol.style.display = 'flex';
+        tipCol.style.flexDirection = 'column';
+        tipCol.style.justifyContent = 'center';
+        tipCol.style.paddingLeft = '12px';
+        tipCol.style.borderLeft = '1px solid rgba(255,255,255,0.06)';
+        tipCol.style.marginLeft = '4px';
+        tipCol.style.color = '#9ca3af';
+        tipCol.style.fontSize = '13px';
+        tipCol.style.lineHeight = '1.4';
+        tipCol.style.flex = '1';
+        tipCol.innerHTML = '💡 <b>Tip:</b> Keep tab in foreground for max speed.';
+  
+        // Append left, right, and tip columns
+        box.appendChild(leftCol);
+        box.appendChild(rightCol);
+        box.appendChild(tipCol);
+        wrap.appendChild(box);
+
+      // attach overlay to document root so fixed positioning works cleanly
+      document.documentElement.appendChild(wrap);
+
+      return {
+        markDone(i) { try { if (segs[i]) segs[i].setAttribute('fill','#10b981'); statusLabel.textContent = `Scanning ${i+1} / ${segs.length}`;} catch (e) {} },
+        setStatus(txt) { try { statusLabel.textContent = String(txt||''); } catch (e) {} },
+        hide() { try { wrap.remove(); } catch (e) {} }
+      };
+    } catch (e) { return null; }
+  }
+
+  async function runSccWithOptions(opts){
+    const sel = getGridSelectedTemplates();
+    if (!sel.length) { alert('Select one template row in the grid first.'); return; }
+    if (sel.length > 1) { alert('Please select only 1 template row to run SCC.'); return; }
+
+    const meta = getSpectroMeta();
+    if (!meta.spectra || !meta.bins || !meta.framesPerSec) { alert('Spectrogram not ready. Generate it first.'); return; }
+
+  // Pause playback safely before heavy SCC work to avoid overlays/audio conflicts
+  try { await safePausePlayback(1000); } catch (e) {}
+  setDisabled(true);
+  // show wait overlay for long runs (provide explicit title/body to avoid stale spectrogram copy)
+  try { window.__spectroWait && window.__spectroWait.show({ etaText: 'Running SCC...', titleText: 'Running SCC', bodyText: 'Computing detections — this may take several seconds.' }); } catch (e) {}
+  // yield briefly so the overlay can paint before heavy synchronous work begins
+  try { await new Promise(r => setTimeout(r, 50)); } catch (e) {}
+  // instrumentation counters
+    let totalCoarsePeaks = 0;
+    let totalRawCandidates = 0;
+
+    // Build template matrices from selections
+    const templates = sel.map(r => extractTemplate2D(
+      meta.spectra, meta.bins, meta.framesPerSec, meta.sampleRate,
+      Number(r.beginTime)||0, Number(r.endTime)||0, Number(r.lowFreq)||0, Number(r.highFreq)||0
+    ));
+
+    
+
+  let runResult = { added: 0, raw: 0, coarse: 0, dedup: 0 };
+  try {
+
+    // Optionally composite
+    let composite = null;
+    if (opts.composite !== 'none' && templates.length >= 1) {
+      composite = composeTemplates(templates, opts.composite);
+    }
+
+  // Build search image = frequency include range. Use user-provided minFreq/maxFreq if present,
+  // otherwise default to templates range +/-100Hz.
+  const tplMin = Math.max(0, Math.min(...sel.map(r => Number(r.lowFreq)||0)));
+  const tplMax = Math.max(...sel.map(r => Number(r.highFreq)||0));
+  const f1Search = (typeof opts.minFreq === 'number' && !isNaN(opts.minFreq)) ? Math.max(0, opts.minFreq) : Math.max(0, tplMin - 100);
+  const f2Search = (typeof opts.maxFreq === 'number' && !isNaN(opts.maxFreq)) ? Math.min(meta.sampleRate/2, opts.maxFreq) : Math.min(meta.sampleRate/2, tplMax + 100);
+
+  const fullDuration = (typeof globalThis._spectroDuration === 'number' && isFinite(globalThis._spectroDuration)) ? globalThis._spectroDuration : Math.max(...sel.map(r => Number(r.endTime)||0));
+  const extractSearch = extractTemplate2D(meta.spectra, meta.bins, meta.framesPerSec, meta.sampleRate, 0, fullDuration, f1Search, f2Search);
+
+    // Downsample according to quality
+    const strides = computeQualityStrides(opts.quality);
+    const searchDS = downsample2D(extractSearch.data, extractSearch.width, extractSearch.height, strides.sx, strides.sy);
+  // debug logs removed
+
+  // Energy floor precompute over search image (mean magnitude per patch approximately via direct values)
+  const energyVals = searchDS.data; // approximate energy with magnitudes
+  const energyThresh = percentile(energyVals, opts.energyPct);
+  // debug logs removed
+
+    // Build template variants
+    const pitchScales = buildScales(opts.pitchTolPct, opts.pitchSteps);
+    const timeScales = buildScales(opts.timeTolPct, opts.timeSteps);
+
+    const templatesToUse = composite ? [{ ...composite, srcIdList: sel.map(r => r.id) }] : templates.map((t,i) => ({ ...t, srcIdList: [sel[i].id] }));
+
+  // debug logs removed
+
+  // Run detection pass for the user options (single pass; no automatic relaxed rerun)
+  const pass1 = await detectCandidatesForParams(meta, extractSearch, templatesToUse, opts, !!opts.allowLowVar);
+    let detections = pass1.detections;
+    totalCoarsePeaks = pass1.coarsePeaks;
+    totalRawCandidates = pass1.rawCandidates;
+
+  // Sort by score desc then t1 asc
+  detections.sort((a,b) => (b.score - a.score) || (a.t1 - b.t1) || (a.f1 - b.f1));
+  // debug logs removed
+
+    setProgress(`Deduplicating (${detections.length} raw detections)...`);
+    
+    let globalMinDistSec = 0;
+    try {
+      const enableEl = document.getElementById('scc-mindist-enable');
+      const distEl = document.getElementById('scc-mindist');
+      if (enableEl && enableEl.checked && distEl && distEl.value) {
+        globalMinDistSec = parseFloat(distEl.value) || 0;
+      }
+    } catch(e) {}
+    
+  // Apply user threshold after deduplication so threshold only filters final detections
+  const dedup = dedupAll.filter(d => (d.score || -1) >= opts.threshold);
+  // debug logs removed
+
+    // Insert into grid
+    // Use the species and other metadata from the selected template row directly.
+    const speciesGuess = sel.length > 0 ? (sel[0].species || '') : '';
+    const speciesScientificGuess = sel.length > 0 ? (sel[0].scientificName || '') : '';
+    const sexGuess = sel.length > 0 ? (sel[0].sex || '') : '';
+    const lifeStageGuess = sel.length > 0 ? (sel[0].lifeStage || '') : '';
+    const soundTypeGuess = sel.length > 0 ? (sel[0].soundType || '') : '';
+
+    // Optionally merge by gap < 1s, based on checkbox
+    let finalDetections = dedup;
+    try {
+      const mergeFlag = !!(document.getElementById('scc-merge') && document.getElementById('scc-merge').checked);
+      let gapSec = 1.0; try { const el = document.getElementById('scc-merge-gap'); const v = parseFloat(el && el.value); if (!isNaN(v)) gapSec = Math.max(0, v); } catch(e){}
+      if (mergeFlag) finalDetections = mergeDetectionsByGap(dedup, gapSec);
+    } catch(e){}
+
+    const rowsToCreate = finalDetections.map((d) => ({
+        beginTime: d.t1,
+        endTime: d.t2,
+        lowFreq: d.f1,
+        highFreq: d.f2,
+        species: speciesGuess,
+        scientificName: speciesScientificGuess,
+        sex: sexGuess,
+        lifeStage: lifeStageGuess,
+        soundType: soundTypeGuess
+    }));
+
+    let addedRows = [];
+    if (rowsToCreate.length) {
+      try { 
+        try { if (window.annotationUndo) window.annotationUndo.saveState(); } catch(e) {} // Undo: save state before SCC create
+        addedRows = globalThis._annotations.addMany(rowsToCreate, 'scc-create');
+      } catch (e) {}
+      // Deselect previously-selected template rows and select newly added rows for convenience
+      try {
+        const grid = window.annotationGrid;
+        const addedIds = addedRows.map(r => r.id);
+        if (grid) {
+          // Try to deselect any currently selected rows
+          try {
+            if (typeof grid.getSelectedRows === 'function') {
+              const prev = grid.getSelectedRows();
+              if (Array.isArray(prev)) prev.forEach(rObj => { try { if (typeof rObj.deselect === 'function') rObj.deselect(); else if (typeof grid.deselectRow === 'function') grid.deselectRow(rObj); } catch(e){} });
+            } else if (typeof grid.deselectRow === 'function') {
+              const selIds = sel.map(s => s.id);
+              selIds.forEach(id => { try { grid.deselectRow(id); } catch(e){} });
+            }
+          } catch (e) {}
+
+          // Select the newly added rows
+          try {
+            if (typeof grid.selectRow === 'function') {
+              for (const id of addedIds) { try { grid.selectRow(id); } catch(e){} }
+              try { window.dispatchEvent(new Event('edit-selection-changed')); } catch(e){}
+            } else if (typeof grid.getRow === 'function') {
+              for (const id of addedIds) { try { const r = grid.getRow(id); if (r && typeof r.select === 'function') r.select(); } catch(e){} }
+            }
+          } catch (e) {}
+        }
+      } catch (e) {}
+    }
+
+    runResult = { added: rowsToCreate.length, raw: totalRawCandidates, coarse: totalCoarsePeaks, dedup: dedup.length };
+
+    setProgress(`${rowsToCreate.length} detections added.`);
+    } catch (e) {
+      throw e;
+    } finally {
+      // hide wait overlay when finished
+      try { window.__spectroWait && window.__spectroWait.hide(); } catch (e) {}
+      setDisabled(false);
+    }
+
+    return runResult;
+
+  }
+
+    // end runSccWithOptions
+
+
+  function wireButton(){
+    const btn = document.getElementById(RUN_BTN_ID);
+    if (!btn) return;
+    if (btn.__sccWired) return;
+
+    function checkScanBtnState() {
+      const scanBtn = document.getElementById('scc-scan');
+      if (!scanBtn) return;
+      if (!__scc_lastScanParams) { scanBtn.disabled = false; return; }
+      const sel = getGridSelectedTemplates();
+      const currentId = sel && sel.length === 1 ? sel[0].id : null;
+      const mfEl = document.getElementById('scc-minfreq');
+      const xfEl = document.getElementById('scc-maxfreq');
+      const minFreq = Number(mfEl ? mfEl.value : '0') || 0;
+      const maxFreq = Number(xfEl ? xfEl.value : '0') || 0;
+
+      if (String(currentId) !== String(__scc_lastScanParams.id) ||
+          minFreq !== __scc_lastScanParams.minFreq ||
+          maxFreq !== __scc_lastScanParams.maxFreq) {
+          scanBtn.disabled = false;
+          const presetsArea = document.getElementById('scc-presets-area');
+          if (presetsArea) presetsArea.style.display = 'none';
+      } else {
+          scanBtn.disabled = false;
+          const presetsArea = document.getElementById('scc-presets-area');
+          if (presetsArea && __scc_lastScanRows) presetsArea.style.display = 'block';
+      }
+    }
+
+    btn.addEventListener('click', async () => {
+      try {
+      // Before opening SCC modal, ensure exactly one template is selected and species is set.
+      try {
+        const selRows = getGridSelectedTemplates() || [];
+        if (!selRows || selRows.length !== 1) {
+          console.warn('SCC abort: No single row selected.');
+          alert('Please select only 1 template row to run SCC.');
+          return;
+        }
+        const uniq = Array.from(new Set(selRows.map(r => (r.scientificName||'').trim()).filter(Boolean)));
+        if (uniq.length === 0) {
+          console.warn('SCC abort: No scientific name.');
+          alert('Selected template contains no Scientific Name. Please set the Species for your template row before running SCC.');
+          return;
+        }
+      } catch (e) { /* continue to open modal on unexpected error */ }
+      // pause playback before opening modal to avoid background audio and focus races
+      try { await safePausePlayback(800); } catch (e) {}
+      const modal = _showModal();
+      const $ = (id) => document.getElementById(id);
+
+      setTimeout(() => {
+        const firstInput = $('scc-minfreq');
+        if (firstInput) firstInput.focus();
+      }, 50);
+
+      try {
+        const selRows = getGridSelectedTemplates() || [];
+        try {
+          const selRows = getGridSelectedTemplates() || [];
+          const presetsArea = document.getElementById('scc-presets-area');
+          const scanBtn = document.getElementById('scc-scan');
+          
+          let calcMinF = 0;
+          let calcMaxF = (globalThis._spectroSampleRate||44100)/2;
+
+          // Always calculate optimal bounds from the current box coordinates
+          if (selRows && selRows.length) {
+            const minF = Math.max(0, Math.min(...selRows.map(r => Number(r.lowFreq)||0)) - 100);
+            const maxF = Math.min((globalThis._spectroSampleRate||44100)/2, Math.max(...selRows.map(r => Number(r.highFreq)||0)) + 100);
+            calcMinF = Math.max(0, Math.floor(minF));
+            calcMaxF = Math.max(0, Math.ceil(maxF));
+          }
+
+          // Populate form fields with these tightly calculated values
+          const minFreqEl = $('scc-minfreq');
+          const maxFreqEl = $('scc-maxfreq');
+          if (minFreqEl) minFreqEl.value = String(calcMinF);
+          if (maxFreqEl) maxFreqEl.value = String(calcMaxF);
+
+          // Now determine if we can restore old scan results
+          const currentId = selRows.length === 1 ? selRows[0].id : null;
+          let canRestore = false;
+          if (__scc_lastScanParams && currentId && String(__scc_lastScanParams.id) === String(currentId)) {
+             // To restore, the newly calculated bounds MUST match the old parameters exactly!
+             if (calcMinF === __scc_lastScanParams.minFreq && 
+                 calcMaxF === __scc_lastScanParams.maxFreq) {
+                 canRestore = true;
+             }
+          }
+
+          if (canRestore) {
+              if (presetsArea && __scc_lastScanRows) presetsArea.style.display = 'block';
+              if (scanBtn) scanBtn.disabled = false;
+          } else {
+              if (presetsArea) presetsArea.style.display = 'none';
+              if (scanBtn) scanBtn.disabled = false;
+          }
+        } catch(e) {}
+      } catch (e) {}
+
+  const run = $('scc-run');
+  const cancel = $('scc-cancel');
+  const close = () => _hideModal();
+  // ensure cancel also aborts any in-flight scan (guarded in case the element was removed from the UI)
+  if (cancel) cancel.onclick = () => { try { if (__scc_currentScan) __scc_currentScan.cancelled = true; } catch (e) {} close(); };
+  // wire top-right X close button, if present
+  try {
+    const closeX = $('scc-close-x');
+    if (closeX && !closeX.__wired) { closeX.addEventListener('click', close); closeX.__wired = true; }
+  } catch(e) {}
+
+      const minFreqEl = $('scc-minfreq');
+      const maxFreqEl = $('scc-maxfreq');
+      if (minFreqEl && !minFreqEl.__sccWired) { minFreqEl.addEventListener('input', checkScanBtnState); minFreqEl.__sccWired = true; }
+      if (maxFreqEl && !maxFreqEl.__sccWired) { maxFreqEl.addEventListener('input', checkScanBtnState); maxFreqEl.__sccWired = true; }
+      
+      const minDistEnable = document.getElementById('scc-mindist-enable');
+      const minDistInput = document.getElementById('scc-mindist');
+      if (minDistEnable && minDistInput && !minDistEnable.__sccWired) {
+        minDistEnable.addEventListener('change', () => {
+          minDistInput.disabled = !minDistEnable.checked;
+          if (minDistEnable.checked) minDistInput.focus();
+        });
+        minDistEnable.__sccWired = true;
+      }
+
+      // Wire the preset scan and stop buttons
+      const scanBtn = $('scc-scan');
+      const stopBtn = $('scc-stop');
+      const presetsArea = document.getElementById('scc-presets-area');
+      if (stopBtn && !stopBtn.__wired) {
+        stopBtn.addEventListener('click', () => {
+          try { if (__scc_currentScan) __scc_currentScan.cancelled = true; } catch (e) {}
+        });
+        stopBtn.__wired = true;
+      }
+      if (scanBtn && !scanBtn.__scanned) {
+        scanBtn.addEventListener('click', async () => {
+          if (!presetsArea) return;
+          const __scanStartTime = performance.now();
+          const timerEl = document.getElementById('scc-timer');
+          if (timerEl) timerEl.textContent = 'Running...';
+          
+              // validate selection first; do not clear existing presets area on invalid selection
+              const sel = getGridSelectedTemplates();
+              if (!sel || sel.length === 0) { alert('Please select a row first.'); return; }
+              // proceed and show searching message
+              presetsArea.style.display = 'block';
+              presetsArea.innerHTML = '<div style="color:#9ca3af">Searching presets, please wait...</div>';
+              // cancel any previous scan and start a fresh one
+              try { if (__scc_currentScan) __scc_currentScan.cancelled = true; } catch (e) {}
+              __scc_currentScan = { cancelled: false };
+              try { scanBtn.disabled = true; if (run) run.disabled = true; } catch (e) {}
+              if (stopBtn) { stopBtn.style.display = 'inline-block'; stopBtn.disabled = false; }
+          try {
+            const sel = getGridSelectedTemplates();
+            if (!sel || sel.length === 0) {
+              presetsArea.innerHTML = '<div style="color:#f97316">Please select a row first.</div>';
+              return;
+            }
+            const meta = getSpectroMeta();
+            if (!meta.spectra || !meta.bins || !meta.framesPerSec) { presetsArea.innerHTML = '<div style="color:#f97316">Spectrogram not ready.</div>'; return; }
+            // frequency include from inputs
+            const minFreq = Number(($('scc-minfreq').value||'0')) || 0;
+            const maxFreq = Number(($('scc-maxfreq').value||String(Math.max(1000, (meta.sampleRate||44100)/2)))) || Math.max(1000, (meta.sampleRate||44100)/2);
+            const fullDuration = (typeof globalThis._spectroDuration === 'number' && isFinite(globalThis._spectroDuration)) ? globalThis._spectroDuration : Math.max(...sel.map(r => Number(r.endTime)||0));
+            const extractSearch = extractTemplate2D(meta.spectra, meta.bins, meta.framesPerSec, meta.sampleRate, 0, fullDuration, minFreq, maxFreq);
+
+            __scc_lastScanParams = {
+              id: sel[0].id,
+              minFreq: minFreq,
+              maxFreq: maxFreq
+            };
+
+            // build templates
+            const templates = sel.map(r => extractTemplate2D(meta.spectra, meta.bins, meta.framesPerSec, meta.sampleRate, Number(r.beginTime)||0, Number(r.endTime)||0, Number(r.lowFreq)||0, Number(r.highFreq)||0));
+
+            // Preset definitions
+            const presets = [
+              { name: 'Quick Scan', opts: { threshold: 0.30, quality: 'balanced', pitchTolPct:5, pitchSteps:3, timeTolPct:0, timeSteps:1, composite:'none', energyPct:20, minDurMs:30 } },
+              { name: 'Balanced Accurate', opts: { threshold: 0.55, quality: 'balanced', pitchTolPct:10, pitchSteps:7, timeTolPct:5, timeSteps:1, composite:'none', energyPct:8, minDurMs:50 } },
+              { name: 'High Recall', opts: { threshold: 0.30, quality: 'balanced', pitchTolPct:20, pitchSteps:5, timeTolPct:10, timeSteps:3, composite:'none', energyPct:0, minDurMs:20 } }
+            ];
+              const rows = [];
+              let stoppedEarly = false;
+              // create scan overlay (5 segments) and attach to presets area
+              let __overlay = null;
+              try { __overlay = createScanOverlay(presetsArea, presets.length); if (__scc_currentScan) __scc_currentScan.overlay = __overlay; } catch (e) { __overlay = null; }
+              for (let i=0;i<presets.length;i++){
+                const p = presets[i];
+                // prepare opts with frequency include
+                const pOpts = Object.assign({}, p.opts, { minFreq, maxFreq });
+                // prepare templatesToUse according to composite
+                const templatesToUse = (pOpts.composite && pOpts.composite !== 'none') ? [{ ...composeTemplates(templates, pOpts.composite), srcIdList: sel.map(r => r.id) }] : templates.map((t,idx)=> ({ ...t, srcIdList: [sel[idx].id] }));
+                
+                try {
+                  const res = await detectCandidatesForParams(meta, extractSearch, templatesToUse, pOpts, true, __scc_currentScan);
+                  if (__scc_currentScan && __scc_currentScan.cancelled) { stoppedEarly = true; break; }
+                    // compute final dedup+threshold count
+                  let dets = res.detections || [];
+                  dets.sort((a,b) => (b.score - a.score) || (a.t1 - b.t1) || (a.f1 - b.f1));
+                  
+                  let globalMinDistSec = 0;
+                  try {
+                    const enableEl = document.getElementById('scc-mindist-enable');
+                    const valEl = document.getElementById('scc-mindist');
+                    if (enableEl && enableEl.checked && valEl) {
+                      const v = parseFloat(valEl.value);
+                      if (!isNaN(v) && v >= 0) globalMinDistSec = v;
+                    }
+                  } catch(e) {}
+                  
+                  const dedupAll = nms(dets, 0.2, globalMinDistSec);
+                  const final = dedupAll.filter(d => (d.score || -1) >= pOpts.threshold);
+                  rows.push({ name: p.name, count: final.length, opts: pOpts, detections: final });
+                  try { if (__overlay) __overlay.markDone(i); if (__overlay) __overlay.setStatus(`${p.name}: ${final.length} detections`); } catch (e) {}
+                } catch (e) {
+                  try { if (__overlay) __overlay.markDone(i); } catch(ex){}
+                }
+                // small yield to keep UI responsive
+                await new Promise(r=>setTimeout(r,0));
+                if (__scc_currentScan && __scc_currentScan.cancelled) { stoppedEarly = true; break; }
+              }
+
+            // store scan rows for later comparison
+            __scc_lastScanRows = rows;
+
+            // render results as a 2-column grid to reduce vertical scrolling
+            const completedCount = rows.length;
+            const presetCount = presets.length;
+            let introText = 'Presets results (select one to apply to the form below):';
+            if (stoppedEarly && completedCount) {
+              introText = `Scan stopped early. Showing ${completedCount} of ${presetCount} preset${presetCount===1?'':'s'} that finished. You can still apply any completed preset below.`;
+            } else if (stoppedEarly && !completedCount) {
+              introText = 'Scan stopped before any preset finished. No cached detections yet.';
+            }
+            let html = `<div style="color:#cbd5e1;margin-bottom:6px;font-size:13px">${introText}</div>`;
+            html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">';
+            for (let i=0;i<rows.length;i++){ const r=rows[i];
+              html += `<label style="display:flex;align-items:flex-start;padding:8px;background:#071722;border-radius:6px;border:1px solid rgba(255,255,255,0.03)"><input type=radio name=scc-preset value=${i} style="margin-right:10px;margin-top:6px"><div style="flex:1"><div style="font-weight:600">${r.name}</div></div><div style="text-align:right;font-weight:600;margin-left:8px">${r.count}</div></label>`;
+            }
+        html += '</div>';
+          // Apply selected preset button (use main merge controls; do not duplicate inside presets)
+        html += '<div style="margin-top:8px; display:flex; align-items:center; justify-content:flex-end; gap:12px">'
+          + '<button id="scc-apply" class="btn" style="background:#0ea5e9; padding:6px 10px; font-size:13px;" disabled>Apply selected preset</button>'
+          + '</div>';
+            presetsArea.innerHTML = html;
+            try { if (__overlay) __overlay.hide(); } catch (e) {}
+
+            // radio change handler fills form values and records selection
+            const radios = presetsArea.querySelectorAll('input[name="scc-preset"]');
+            const applyBtn = presetsArea.querySelector('#scc-apply');
+            const mergeApply = presetsArea.querySelector('#scc-merge-apply');
+            const mergeGapApply = presetsArea.querySelector('#scc-merge-gap-apply');
+            // sync with main checkbox if present
+            try {
+              const mergeMain = document.getElementById('scc-merge');
+              const mergeGapMain = document.getElementById('scc-merge-gap');
+              if (mergeMain && mergeApply) {
+                mergeApply.checked = !!mergeMain.checked;
+                mergeApply.addEventListener('change',()=>{ mergeMain.checked = mergeApply.checked; });
+                mergeMain.addEventListener('change',()=>{ mergeApply.checked = mergeMain.checked; });
+              }
+              if (mergeGapMain && mergeGapApply) {
+                mergeGapApply.value = mergeGapMain.value;
+                mergeGapApply.addEventListener('input',()=>{ mergeGapMain.value = mergeGapApply.value; });
+                mergeGapMain.addEventListener('input',()=>{ mergeGapApply.value = mergeGapMain.value; });
+              }
+            } catch(e){}
+            radios.forEach(rb => rb.addEventListener('change', (ev) => {
+              const idx = Number(ev.target.value);
+              __scc_lastSelectedPresetIndex = idx;
+              const selPreset = rows[idx];
+              if (!selPreset) return;
+              // populate only the three kept form fields (min duration, min freq, max freq)
+              try { if (document.getElementById('scc-mindur')) document.getElementById('scc-mindur').value = String(selPreset.opts.minDurMs || selPreset.opts.minDur || 50); } catch(e){}
+              try { if (document.getElementById('scc-minfreq')) document.getElementById('scc-minfreq').value = String(Math.max(0, Math.floor(selPreset.opts.minFreq||0))); } catch(e){}
+              try { if (document.getElementById('scc-maxfreq')) document.getElementById('scc-maxfreq').value = String(Math.max(0, Math.ceil(selPreset.opts.maxFreq||0))); } catch(e){}
+              if (applyBtn) applyBtn.disabled = !(selPreset && Array.isArray(selPreset.detections) && selPreset.detections.length);
+            }));
+
+            // Wire Apply selected preset: insert cached detection rows
+            if (applyBtn && !applyBtn.__wired) {
+              applyBtn.addEventListener('click', async () => {
+                try {
+                  // ensure selection present
+                  const idx = (typeof __scc_lastSelectedPresetIndex === 'number') ? __scc_lastSelectedPresetIndex : -1;
+                  if (idx < 0 || !rows[idx]) { alert('Select a preset first.'); return; }
+                  const presetRow = rows[idx];
+                  const dets = Array.isArray(presetRow.detections) ? presetRow.detections : [];
+                  if (!dets.length) { alert('No detections cached for the selected preset.'); return; }
+
+                  // show overlay
+                  try { window.__spectroWait && window.__spectroWait.show({ etaText: 'Applying preset…', titleText: 'Applying preset', bodyText: 'Inserting cached detections into the grid. Please wait…' }); } catch(e){}
+                  try { await new Promise(r=>setTimeout(r,20)); } catch(e){}
+
+                  // species guess (match run behavior)
+                  // Use the species and other metadata from the selected template row directly.
+                  const selRows = getGridSelectedTemplates();
+                  const speciesGuess = selRows.length > 0 ? (selRows[0].species || '') : '';
+                  const speciesScientificGuess = selRows.length > 0 ? (selRows[0].scientificName || '') : '';
+                  const sexGuess = selRows.length > 0 ? (selRows[0].sex || '') : '';
+                  const lifeStageGuess = selRows.length > 0 ? (selRows[0].lifeStage || '') : '';
+                  const soundTypeGuess = selRows.length > 0 ? (selRows[0].soundType || '') : '';
+
+                  // Optionally merge by gap < 1s
+                  let toInsert = dets;
+                  try {
+                    const mergeFlag = !!(document.getElementById('scc-merge-apply') && document.getElementById('scc-merge-apply').checked) || !!(document.getElementById('scc-merge') && document.getElementById('scc-merge').checked);
+                    let gapSec = 1.0;
+                    try {
+                      const elA = document.getElementById('scc-merge-gap-apply');
+                      const elM = document.getElementById('scc-merge-gap');
+                      const v = parseFloat(elA && elA.value || elM && elM.value);
+                      if (!isNaN(v)) gapSec = Math.max(0, v);
+                    } catch(e){}
+                    if (mergeFlag) toInsert = mergeDetectionsByGap(dets, gapSec);
+                  } catch(e){}
+                const rowsToCreate = toInsert.map((d) => ({
+                    beginTime: Number(round4(d.t1)),
+                    endTime: Number(round4(d.t2)),
+                    lowFreq: Number(round4(d.f1)),
+                    highFreq: Number(round4(d.f2)),
+                    species: speciesGuess,
+                    scientificName: speciesScientificGuess,
+                    sex: sexGuess,
+                    lifeStage: lifeStageGuess,
+                    soundType: soundTypeGuess,
+                    notes: ''
+                  }));
+
+                if (rowsToCreate.length) {
+                  let addedRows = [];
+                  try {
+                    try { if (window.annotationUndo) window.annotationUndo.saveState(); } catch(e) {} // Undo: save state before SCC apply
+                    addedRows = globalThis._annotations.addMany(rowsToCreate, 'scc-apply');
+                      // Deselect previous, select newly-added
+                      const grid = window.annotationGrid;
+                      if (grid && typeof grid.getSelectedRows === 'function') {
+                        const prev = grid.getSelectedRows();
+                        if (Array.isArray(prev)) prev.forEach(rObj => { try { if (typeof rObj.deselect === 'function') rObj.deselect(); else if (typeof grid.deselectRow === 'function') grid.deselectRow(rObj); } catch(e){} });
+                      }
+                      if (grid && typeof grid.selectRow === 'function') {
+                        for (const r of addedRows) { try { grid.selectRow(r.id); } catch(e){} }
+                        try { window.dispatchEvent(new Event('edit-selection-changed')); } catch(e){}
+                      }
+                    } catch(e){}
+                  if (addedRows && addedRows.length > 0) applyBtn.disabled = true;
+                  try { _hideModal(); } catch(e){}
+                  }
+
+                } catch (e) {
+                  alert('Apply failed: ' + (e && e.message ? e.message : String(e)));
+                } finally {
+                  try { window.__spectroWait && window.__spectroWait.hide(); } catch(e){}
+                }
+              });
+              applyBtn.__wired = true;
+            }
+
+          } catch (e) {
+            if (__scc_currentScan && __scc_currentScan.cancelled) {
+              presetsArea.innerHTML = '<div style="color:#f59e0b">Search cancelled.</div>';
+            } else {
+              presetsArea.innerHTML = '<div style="color:#f97316">Search failed: ' + (e && e.message ? e.message : String(e)) + '</div>';
+            }
+          } finally {
+            try { 
+              const timerEl = document.getElementById('scc-timer');
+              if (timerEl) {
+                const __scanEndTime = performance.now();
+                timerEl.textContent = `Completed in: ${((__scanEndTime - __scanStartTime)/1000).toFixed(2)}s`;
+              }
+            } catch(e) {}
+            try { scanBtn.disabled = false; } catch (e) {}
+            try { if (run) run.disabled = false; } catch (e) {}
+            if (stopBtn) { stopBtn.style.display = 'none'; }
+            __scc_currentScan = null;
+          }
+        });
+        scanBtn.__scanned = true;
+      }
+      // The "Run" button was removed from the modal UI per simplified workflow; keep wiring complete but do not attach a run handler here.
+      checkScanBtnState();
+
+      } catch (err) {
+        console.error('SCC Error:', err);
+        alert('An unexpected error occurred opening SCC: ' + err.message);
+      }
+    });
+    btn.__sccWired = true;
+  }
+
+  // Defer wire until DOM ready
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', wireButton);
+  else wireButton();
+})();

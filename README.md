@@ -14,7 +14,11 @@ Visualize and navigate bird song recordings with integrated audio player and aut
 
 **Prompt preview:**
 
-![Generation Prompt](screenshots/interface-preview-prompt.png)
+![Prompt preview](screenshots/interface-preview-prompt.png)
+
+**Spectrolipi integration:**
+
+![Spectrolipi](screenshots/spectrolipi_integration.jpg)
 
 ## ✨ Features
 

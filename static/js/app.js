@@ -166,10 +166,9 @@ async function showFile(path, filename, spectrogramFile) {
     html += '<div class="file-info"><h3>🐦 ' + filename + '</h3>';
     html += `<p><strong>Path:</strong> ${path}/${filename}</p>`;
     html += `<a href="${audioUrl}" download class="download-btn">⬇️ Download Audio</a>`;
+        if (spectrogramUrl) html += `<a href="${spectrogramUrl}" download class="download-btn">⬇️ Download Spectrogram</a>`;
     
     html += `<button id="audacityBtn" onclick="openInAudacity('${safePath}', '${safeFilename}')" class="audacity-btn">🎵 Audacity</button>`;
-    if (spectrogramUrl) html += `<a href="${spectrogramUrl}" download class="download-btn">⬇️ Download Spectrogram</a>`;
-    
     html += `<button id="spectrolipiBtn" onclick="openInSpectrolipi('${safePath}', '${safeFilename}')" class="spectrolipi-btn">🔎​ Spectrolipi</button>`;
     
     html += '<div class="coordinates-form">';

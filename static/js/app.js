@@ -1,5 +1,7 @@
 let structure = [];
 let originalTree = null;
+let currentDisplayedFile = null;
+let repoBasePath = '';
 
 async function loadStructure() {
     try {
@@ -143,6 +145,7 @@ function filterTree(searchTerm, spectroFilter = 'all') {
 }
 
 async function showFile(path, filename, spectrogramFile) {
+    currentDisplayedFile = `${path}/${filename}`;
     const safePath = path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilename = filename.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '\\"');
     const safeFilepath = `${safePath}/${safeFilename}`;
@@ -266,8 +269,23 @@ function closeReadme() { document.getElementById('readmeModal').classList.remove
 document.getElementById('readmeModal').onclick = (e) => { if (e.target.id === 'readmeModal') closeReadme(); };
 
 function showGenerateModal() {
-    document.getElementById('generateModal').classList.add('show');
+    const modal = document.getElementById('generateModal');
+    if (modal) modal.classList.add('show');
     resetGenerationForm();
+    
+    if (currentDisplayedFile && repoBasePath) {
+        const genFile = document.getElementById('genFile');
+        const genFilePath = document.getElementById('genFilePath');
+        const fileSelection = document.getElementById('fileSelection');
+        const dirSelection = document.getElementById('dirSelection');
+        
+        if (genFile && genFilePath && fileSelection && dirSelection) {
+            genFile.checked = true;
+            genFilePath.value = repoBasePath + currentDisplayedFile;
+            fileSelection.style.display = 'block';
+            dirSelection.style.display = 'none';
+        }
+    }
 }
 
 function closeGenerateModal() { document.getElementById('generateModal').classList.remove('show'); }
@@ -446,6 +464,14 @@ function toggleMenu() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    fetch('/api/repo_path')
+        .then(res => res.json())
+        .then(data => {
+            repoBasePath = data.path || '';
+            console.log('Repo base path:', repoBasePath);
+        })
+        .catch(err => console.error('Error loading repo path:', err));
+    
     loadStructure();
     
     const searchInput = document.getElementById('searchInput');

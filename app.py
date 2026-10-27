@@ -261,6 +261,15 @@ def refresh_structure():
     clear_structure_cache()
     return jsonify({'message': 'Structure refreshed'})
 
+@app.route('/api/repo_path')
+def get_repo_path():
+    if not REPO_PATH:
+        return jsonify({'path': ''})
+    path = str(REPO_PATH)
+    if not path.endswith('/'):
+        path += '/'
+    return jsonify({'path': path})
+
 @app.route('/api/generate_spectrogram', methods=['POST'])
 def api_generate_spectrogram():
     if not REPO_PATH:
